@@ -1,0 +1,15 @@
+[package]
+name = "usbc"
+version = "0.1.0"
+edition = "2021"
+description = "USB Type-C cable quality warning tool"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+udev = "0.9"
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
