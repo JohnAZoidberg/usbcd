@@ -58,6 +58,7 @@ fn read_port(base: &Path, n: u32) -> Option<Port> {
 
     let partner = read_partner(base, n);
     let cable = read_cable(base, n);
+    let power = read_power_capabilities(&port_dir);
 
     Some(Port {
         number: n,
@@ -65,6 +66,7 @@ fn read_port(base: &Path, n: u32) -> Option<Port> {
         power_role,
         partner,
         cable,
+        power,
     })
 }
 
@@ -77,11 +79,13 @@ fn read_partner(base: &Path, port_num: u32) -> Option<Partner> {
     let identity = read_pd_identity(&partner_dir);
     let pd_revision = read_pd_revision(&partner_dir);
     let alt_modes = read_alt_modes(base, port_num, "partner");
+    let power = read_power_capabilities(&partner_dir);
 
     Some(Partner {
         identity,
         pd_revision,
         alt_modes,
+        power,
     })
 }
 
@@ -174,6 +178,110 @@ fn read_alt_modes(base: &Path, port_num: u32, kind: &str) -> Vec<AltMode> {
         modes.push(AltMode { svid, vdo });
     }
     modes
+}
+
+fn read_power_capabilities(dir: &Path) -> Option<PowerCapabilities> {
+    let pd_dir = dir.join("usb_power_delivery");
+    if !pd_dir.exists() {
+        return None;
+    }
+
+    let source = read_pdos(&pd_dir.join("source-capabilities"));
+    let sink = read_pdos(&pd_dir.join("sink-capabilities"));
+
+    if source.is_empty() && sink.is_empty() {
+        return None;
+    }
+
+    Some(PowerCapabilities { source, sink })
+}
+
+fn read_pdos(caps_dir: &Path) -> Vec<Pdo> {
+    let entries = match fs::read_dir(caps_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut pdos: Vec<(u32, Pdo)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let pdo_dir = entry.path();
+        if !pdo_dir.is_dir() {
+            continue;
+        }
+
+        // Parse "N:type_name" format
+        let (position, pdo_type) = match name_str.split_once(':') {
+            Some((pos, typ)) => match pos.parse::<u32>() {
+                Ok(n) => (n, typ),
+                Err(_) => continue,
+            },
+            None => continue,
+        };
+
+        let pdo = match pdo_type {
+            "fixed_supply" => {
+                let voltage_mv = read_decimal_file(&pdo_dir.join("voltage"));
+                let current_ma = read_decimal_file(&pdo_dir.join("maximum_current"))
+                    .or_else(|| read_decimal_file(&pdo_dir.join("operational_current")))
+                    .unwrap_or(0);
+                Pdo::FixedSupply {
+                    voltage_mv: voltage_mv.unwrap_or(0),
+                    current_ma,
+                }
+            }
+            "variable_supply" => {
+                let min_voltage_mv = read_decimal_file(&pdo_dir.join("minimum_voltage")).unwrap_or(0);
+                let max_voltage_mv = read_decimal_file(&pdo_dir.join("maximum_voltage")).unwrap_or(0);
+                let current_ma = read_decimal_file(&pdo_dir.join("maximum_current"))
+                    .or_else(|| read_decimal_file(&pdo_dir.join("operational_current")))
+                    .unwrap_or(0);
+                Pdo::VariableSupply {
+                    min_voltage_mv,
+                    max_voltage_mv,
+                    current_ma,
+                }
+            }
+            "battery" => {
+                let min_voltage_mv = read_decimal_file(&pdo_dir.join("minimum_voltage")).unwrap_or(0);
+                let max_voltage_mv = read_decimal_file(&pdo_dir.join("maximum_voltage")).unwrap_or(0);
+                let power_mw = read_decimal_file(&pdo_dir.join("maximum_power"))
+                    .or_else(|| read_decimal_file(&pdo_dir.join("operational_power")))
+                    .unwrap_or(0);
+                Pdo::Battery {
+                    min_voltage_mv,
+                    max_voltage_mv,
+                    power_mw,
+                }
+            }
+            "programmable_supply" => {
+                let min_voltage_mv = read_decimal_file(&pdo_dir.join("minimum_voltage")).unwrap_or(0);
+                let max_voltage_mv = read_decimal_file(&pdo_dir.join("maximum_voltage")).unwrap_or(0);
+                let max_current_ma = read_decimal_file(&pdo_dir.join("maximum_current")).unwrap_or(0);
+                Pdo::ProgrammableSupply {
+                    min_voltage_mv,
+                    max_voltage_mv,
+                    max_current_ma,
+                }
+            }
+            _ => continue,
+        };
+
+        pdos.push((position, pdo));
+    }
+
+    pdos.sort_by_key(|(pos, _)| *pos);
+    pdos.into_iter().map(|(_, pdo)| pdo).collect()
+}
+
+fn read_decimal_file(path: &Path) -> Option<u32> {
+    let s = fs::read_to_string(path).ok()?;
+    let s = s.trim();
+    // Kernel may emit value with "mV", "mA", "mW" suffix — strip any non-digit suffix.
+    let num_str: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+    num_str.parse().ok()
 }
 
 fn read_hex_file(path: &Path) -> u32 {
@@ -314,6 +422,25 @@ pub fn create_fake_cable(
     }
 }
 
+/// Create a fake usb_power_delivery directory tree for testing.
+/// `role` is "source-capabilities" or "sink-capabilities".
+/// `pdos` is a list of (dir_name, attributes) where dir_name is like "1:fixed_supply".
+#[cfg(test)]
+pub fn create_fake_pdo_caps(
+    dir: &Path,
+    role: &str,
+    pdos: &[(&str, &[(&str, &str)])],
+) {
+    let caps_dir = dir.join("usb_power_delivery").join(role);
+    for (name, attrs) in pdos {
+        let pdo_dir = caps_dir.join(name);
+        fs::create_dir_all(&pdo_dir).unwrap();
+        for (key, value) in *attrs {
+            fs::write(pdo_dir.join(key), value).unwrap();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +497,38 @@ mod tests {
         let cable = p.cable.as_ref().unwrap();
         assert_eq!(cable.identity.id_header_vdo, 0x18002e98);
         assert_eq!(cable.cable_type, CableType::Passive);
+    }
+
+    #[test]
+    fn test_read_pdos() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        create_fake_port(base, 0, "[host] device", "[source] sink");
+
+        let port_dir = base.join("port0");
+        create_fake_pdo_caps(
+            &port_dir,
+            "source-capabilities",
+            &[
+                ("1:fixed_supply", &[("voltage", "5000"), ("maximum_current", "3000")][..]),
+                ("2:fixed_supply", &[("voltage", "9000"), ("maximum_current", "3000")]),
+                ("3:fixed_supply", &[("voltage", "20000"), ("maximum_current", "5000")]),
+                ("4:programmable_supply", &[
+                    ("minimum_voltage", "3300"),
+                    ("maximum_voltage", "21000"),
+                    ("maximum_current", "5000"),
+                ]),
+            ],
+        );
+
+        let ports = scan_ports_at(base);
+        assert_eq!(ports.len(), 1);
+        let p = &ports[0];
+        let power = p.power.as_ref().unwrap();
+        assert_eq!(power.source.len(), 4);
+        assert!(matches!(power.source[0], Pdo::FixedSupply { voltage_mv: 5000, current_ma: 3000 }));
+        assert!(matches!(power.source[3], Pdo::ProgrammableSupply { min_voltage_mv: 3300, max_voltage_mv: 21000, max_current_ma: 5000 }));
+        assert!(power.sink.is_empty());
     }
 }

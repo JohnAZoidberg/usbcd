@@ -419,6 +419,7 @@ mod tests {
             },
             pd_revision: pd_rev,
             alt_modes,
+            power: None,
         }
     }
 
@@ -592,6 +593,7 @@ mod tests {
             power_role: PowerRole::Source,
             partner: Some(partner),
             cable: Some(cable),
+            power: None,
         };
         let warnings = check_cable_quality(&port);
         assert!(warnings.contains(&CableWarning::InvalidUsb4Cable));
@@ -624,6 +626,7 @@ mod tests {
             power_role: PowerRole::Source,
             partner: Some(partner),
             cable: Some(cable),
+            power: None,
         };
         let warnings = check_cable_quality(&port);
         assert!(warnings.contains(&CableWarning::InvalidUsb4ValidTbtCable));
@@ -646,6 +649,7 @@ mod tests {
             power_role: PowerRole::Source,
             partner: Some(partner),
             cable: Some(cable),
+            power: None,
         };
         let warnings = check_cable_quality(&port);
         assert!(warnings.contains(&CableWarning::InvalidTbtCable));
@@ -659,6 +663,7 @@ mod tests {
             power_role: PowerRole::Source,
             partner: None,
             cable: None,
+            power: None,
         };
         let warnings = check_cable_quality(&port);
         assert!(warnings.is_empty());
@@ -682,6 +687,7 @@ mod tests {
             power_role: PowerRole::Source,
             partner: Some(partner),
             cable: Some(cable),
+            power: None,
         };
         // Partner supports USB4 and cable supports USB4 (passive, speed != USB2.0)
         // So USB4 mode entry succeeds. Then we check speed limiting.

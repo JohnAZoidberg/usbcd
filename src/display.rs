@@ -2,7 +2,7 @@ use crate::quality;
 use crate::types::*;
 use crate::vdo;
 
-pub fn print_status(ports: &[Port]) -> bool {
+pub fn print_status(ports: &[Port], verbose: bool) -> bool {
     let mut any_warnings = false;
 
     if ports.is_empty() {
@@ -11,7 +11,7 @@ pub fn print_status(ports: &[Port]) -> bool {
     }
 
     for port in ports {
-        print_port(port);
+        print_port(port, verbose);
         let warnings = quality::check_cable_quality(port);
         if !warnings.is_empty() {
             any_warnings = true;
@@ -26,23 +26,36 @@ pub fn print_status(ports: &[Port]) -> bool {
     any_warnings
 }
 
-fn print_port(port: &Port) {
+fn print_port(port: &Port, verbose: bool) {
     println!(
         "Port {} [{}/{}]",
         port.number, port.data_role, port.power_role
     );
 
+    if verbose {
+        if let Some(power) = &port.power {
+            if !power.source.is_empty() {
+                println!("  Port Source Capabilities:");
+                print_pdo_list(&power.source, "    ");
+            }
+            if !power.sink.is_empty() {
+                println!("  Port Sink Capabilities:");
+                print_pdo_list(&power.sink, "    ");
+            }
+        }
+    }
+
     match &port.partner {
-        Some(partner) => print_partner(partner),
+        Some(partner) => print_partner(partner, port, verbose),
         None => println!("  (nothing connected)"),
     }
 
     if let Some(cable) = &port.cable {
-        print_cable(cable);
+        print_cable(cable, verbose);
     }
 }
 
-fn print_partner(partner: &Partner) {
+fn print_partner(partner: &Partner, port: &Port, verbose: bool) {
     let product_type = vdo::field(
         partner.identity.id_header_vdo,
         vdo::ID_HEADER_VDO_PRODUCT_TYPE_OFFSET,
@@ -70,6 +83,68 @@ fn print_partner(partner: &Partner) {
 
     println!("  Partner: {type_str}{caps_str}");
 
+    if verbose {
+        // ID Header VDO
+        if partner.identity.id_header_vdo != 0 {
+            println!("    ID Header: {:#010x}", partner.identity.id_header_vdo);
+            vdo::print_vdo_fields(
+                partner.identity.id_header_vdo,
+                vdo::ID_HEADER_VDO_FIELDS,
+                "    ",
+            );
+        }
+
+        // UFP VDO1
+        if partner.identity.product_type_vdo1 != 0
+            && (product_type == vdo::ID_HEADER_VDO_PRODUCT_TYPE_UFP_HUB
+                || product_type == vdo::ID_HEADER_VDO_PRODUCT_TYPE_UFP_PERIPHERAL)
+        {
+            println!(
+                "    UFP VDO1: {:#010x}",
+                partner.identity.product_type_vdo1
+            );
+            vdo::print_vdo_fields(
+                partner.identity.product_type_vdo1,
+                vdo::UFP_VDO1_FIELDS,
+                "    ",
+            );
+        }
+
+        // DFP VDO (VDO3)
+        if partner.identity.product_type_vdo3 != 0 {
+            println!(
+                "    DFP VDO (VDO3): {:#010x}",
+                partner.identity.product_type_vdo3
+            );
+            vdo::print_vdo_fields(
+                partner.identity.product_type_vdo3,
+                vdo::DFP_VDO_FIELDS,
+                "    ",
+            );
+        }
+    } else {
+        // Non-verbose: show DFP capability from VDO3 if partner is dual-role
+        if partner.identity.product_type_vdo3 != 0 && is_dual_role_partner(partner) {
+            let dfp_type = vdo::dfp_product_type_name(partner.identity.id_header_vdo);
+            if dfp_type != "not DFP" {
+                let host_cap = vdo::field(
+                    partner.identity.product_type_vdo3,
+                    24,
+                    0x7,
+                );
+                if host_cap != 0 {
+                    let host_desc = match host_cap {
+                        1 => "USB 2.0",
+                        2 => "USB 3.2",
+                        4 => "USB4",
+                        _ => "unknown",
+                    };
+                    println!("    DFP: {dfp_type} ({host_desc})");
+                }
+            }
+        }
+    }
+
     if !partner.alt_modes.is_empty() {
         let modes: Vec<String> = partner
             .alt_modes
@@ -81,9 +156,39 @@ fn print_partner(partner: &Partner) {
             .collect();
         println!("    Alt Modes: {}", modes.join(", "));
     }
+
+    // Power info
+    if !verbose {
+        // Normal mode: one-line power summary
+        if let Some(power) = &port.power {
+            if !power.source.is_empty() {
+                println!("    Power: {}", format_power_summary(&power.source));
+            }
+        }
+        if let Some(power) = &partner.power {
+            if !power.source.is_empty() {
+                println!(
+                    "    Partner Power: {}",
+                    format_power_summary(&power.source)
+                );
+            }
+        }
+    } else {
+        // Verbose mode: full PDO breakdown for partner
+        if let Some(power) = &partner.power {
+            if !power.source.is_empty() {
+                println!("    Partner Source Capabilities:");
+                print_pdo_list(&power.source, "      ");
+            }
+            if !power.sink.is_empty() {
+                println!("    Partner Sink Capabilities:");
+                print_pdo_list(&power.sink, "      ");
+            }
+        }
+    }
 }
 
-fn print_cable(cable: &Cable) {
+fn print_cable(cable: &Cable, verbose: bool) {
     let speed = cable.identity.product_type_vdo1 & vdo::USB_SPEED_MASK;
     let speed_str = vdo::usb_speed_name(speed, cable.pd_revision);
 
@@ -99,6 +204,34 @@ fn print_cable(cable: &Cable) {
     };
 
     println!("  Cable: {}{info_str}", cable.cable_type);
+
+    if verbose {
+        // Cable VDO1
+        if cable.identity.product_type_vdo1 != 0 {
+            let fields = match cable.cable_type {
+                CableType::Active => vdo::ACTIVE_CABLE_VDO1_FIELDS,
+                _ => vdo::PASSIVE_CABLE_VDO1_FIELDS,
+            };
+            println!(
+                "    Cable VDO1: {:#010x}",
+                cable.identity.product_type_vdo1
+            );
+            vdo::print_vdo_fields(cable.identity.product_type_vdo1, fields, "    ");
+        }
+
+        // Active Cable VDO2
+        if cable.cable_type == CableType::Active && cable.identity.product_type_vdo2 != 0 {
+            println!(
+                "    Cable VDO2: {:#010x}",
+                cable.identity.product_type_vdo2
+            );
+            vdo::print_vdo_fields(
+                cable.identity.product_type_vdo2,
+                vdo::ACTIVE_CABLE_VDO2_FIELDS,
+                "    ",
+            );
+        }
+    }
 
     if !cable.plug_alt_modes.is_empty() {
         let modes: Vec<String> = cable
@@ -132,10 +265,159 @@ fn partner_has_usb4(partner: &Partner) -> bool {
     (cap & vdo::DEVICE_CAPABILITY_USB4) != 0
 }
 
+/// Check if partner has both UFP and DFP product types set (dual-role).
+fn is_dual_role_partner(partner: &Partner) -> bool {
+    let ufp = vdo::field(
+        partner.identity.id_header_vdo,
+        vdo::ID_HEADER_VDO_PRODUCT_TYPE_OFFSET,
+        vdo::ID_HEADER_VDO_PRODUCT_TYPE_MASK,
+    );
+    let dfp = vdo::field(
+        partner.identity.id_header_vdo,
+        vdo::ID_HEADER_VDO_PRODUCT_TYPE_DFP_OFFSET,
+        vdo::ID_HEADER_VDO_PRODUCT_TYPE_MASK,
+    );
+    ufp != 0 && dfp != 0
+}
+
 fn alt_mode_name(svid: u16) -> &'static str {
     match svid {
         vdo::DP_ALT_MODE_SID => "DP",
         vdo::TBT_ALT_MODE_VID => "TBT",
         _ => "Vendor",
     }
+}
+
+// --- PDO formatting ---
+
+fn print_pdo_list(pdos: &[Pdo], indent: &str) {
+    for (i, pdo) in pdos.iter().enumerate() {
+        println!("{indent}{}: {}", i + 1, format_pdo(pdo));
+    }
+}
+
+fn format_pdo(pdo: &Pdo) -> String {
+    match pdo {
+        Pdo::FixedSupply {
+            voltage_mv,
+            current_ma,
+        } => {
+            let watts = (*voltage_mv as u64) * (*current_ma as u64) / 1_000_000;
+            format!(
+                "{:.1}V {:.1}A {watts}W [fixed]",
+                *voltage_mv as f64 / 1000.0,
+                *current_ma as f64 / 1000.0,
+            )
+        }
+        Pdo::VariableSupply {
+            min_voltage_mv,
+            max_voltage_mv,
+            current_ma,
+        } => format!(
+            "{:.1}-{:.1}V {:.1}A [variable]",
+            *min_voltage_mv as f64 / 1000.0,
+            *max_voltage_mv as f64 / 1000.0,
+            *current_ma as f64 / 1000.0,
+        ),
+        Pdo::Battery {
+            min_voltage_mv,
+            max_voltage_mv,
+            power_mw,
+        } => format!(
+            "{:.1}-{:.1}V {:.1}W [battery]",
+            *min_voltage_mv as f64 / 1000.0,
+            *max_voltage_mv as f64 / 1000.0,
+            *power_mw as f64 / 1000.0,
+        ),
+        Pdo::ProgrammableSupply {
+            min_voltage_mv,
+            max_voltage_mv,
+            max_current_ma,
+        } => format!(
+            "{:.1}-{:.1}V {:.1}A [PPS]",
+            *min_voltage_mv as f64 / 1000.0,
+            *max_voltage_mv as f64 / 1000.0,
+            *max_current_ma as f64 / 1000.0,
+        ),
+    }
+}
+
+/// Format a one-line power summary from a list of PDOs.
+/// E.g. "5/9/15/20V 5A 100W (PPS 3.3-21.0V)"
+fn format_power_summary(pdos: &[Pdo]) -> String {
+    let mut voltages = Vec::new();
+    let mut max_current_ma: u32 = 0;
+    let mut max_power_mw: u64 = 0;
+    let mut pps_ranges = Vec::new();
+
+    for pdo in pdos {
+        match pdo {
+            Pdo::FixedSupply {
+                voltage_mv,
+                current_ma,
+            } => {
+                voltages.push(*voltage_mv);
+                if *current_ma > max_current_ma {
+                    max_current_ma = *current_ma;
+                }
+                let power = (*voltage_mv as u64) * (*current_ma as u64) / 1000;
+                if power > max_power_mw {
+                    max_power_mw = power;
+                }
+            }
+            Pdo::ProgrammableSupply {
+                min_voltage_mv,
+                max_voltage_mv,
+                ..
+            } => {
+                pps_ranges.push((*min_voltage_mv, *max_voltage_mv));
+            }
+            _ => {}
+        }
+    }
+
+    if voltages.is_empty() {
+        return "no fixed PDOs".to_string();
+    }
+
+    let voltage_str: Vec<String> = voltages
+        .iter()
+        .map(|v| {
+            let fv = *v as f64 / 1000.0;
+            if fv.fract() == 0.0 {
+                format!("{:.0}", fv)
+            } else {
+                format!("{:.1}", fv)
+            }
+        })
+        .collect();
+
+    let current_str = {
+        let fc = max_current_ma as f64 / 1000.0;
+        if fc.fract() == 0.0 {
+            format!("{:.0}A", fc)
+        } else {
+            format!("{:.1}A", fc)
+        }
+    };
+
+    let watts = max_power_mw / 1000;
+
+    let mut result = format!("{}V {} {watts}W", voltage_str.join("/"), current_str);
+
+    if !pps_ranges.is_empty() {
+        let pps_strs: Vec<String> = pps_ranges
+            .iter()
+            .map(|(min, max)| {
+                format!(
+                    "{:.1}-{:.1}V",
+                    *min as f64 / 1000.0,
+                    *max as f64 / 1000.0
+                )
+            })
+            .collect();
+        result.push_str(&format!(" (PPS {})", pps_strs.join(", ")));
+    }
+
+    result
 }

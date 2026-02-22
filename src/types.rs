@@ -102,10 +102,40 @@ impl Default for PdIdentity {
 }
 
 #[derive(Debug, Clone)]
+pub enum Pdo {
+    FixedSupply {
+        voltage_mv: u32,
+        current_ma: u32,
+    },
+    VariableSupply {
+        min_voltage_mv: u32,
+        max_voltage_mv: u32,
+        current_ma: u32,
+    },
+    Battery {
+        min_voltage_mv: u32,
+        max_voltage_mv: u32,
+        power_mw: u32,
+    },
+    ProgrammableSupply {
+        min_voltage_mv: u32,
+        max_voltage_mv: u32,
+        max_current_ma: u32,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PowerCapabilities {
+    pub source: Vec<Pdo>,
+    pub sink: Vec<Pdo>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Partner {
     pub identity: PdIdentity,
     pub pd_revision: PdRevision,
     pub alt_modes: Vec<AltMode>,
+    pub power: Option<PowerCapabilities>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +153,7 @@ pub struct Port {
     pub power_role: PowerRole,
     pub partner: Option<Partner>,
     pub cable: Option<Cable>,
+    pub power: Option<PowerCapabilities>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

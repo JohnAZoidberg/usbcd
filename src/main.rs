@@ -21,7 +21,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Show USB-C port state, connected devices, cable info, and quality warnings
-    Status,
+    Status {
+        /// Show verbose VDO field breakdown and per-PDO listing
+        #[arg(short, long)]
+        verbose: bool,
+    },
     /// Watch for USB-C events and send desktop notifications for cable quality issues
     Monitor,
 }
@@ -31,9 +35,9 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Status => {
+        Commands::Status { verbose } => {
             let ports = sysfs::scan_ports();
-            let has_warnings = display::print_status(&ports);
+            let has_warnings = display::print_status(&ports, verbose);
             if has_warnings {
                 std::process::exit(1);
             }
