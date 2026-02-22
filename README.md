@@ -156,3 +156,31 @@ journalctl --user -u usbc-monitor
 
 Works on any Linux system with USB Type-C ports: Framework laptops, ThinkPads,
 Dell XPS, etc.
+
+## Troubleshooting
+
+### `/sys/class/typec/` is empty
+
+The directory exists but contains no `portN` entries. This usually means the
+UCSI (USB Type-C Connector System Interface) driver failed to initialize.
+
+Check the kernel log:
+
+```
+journalctl -k -g ucsi
+```
+
+If you see `ucsi_acpi: error -ETIMEDOUT: PPM init failed`, the driver timed
+out talking to the EC firmware. Reloading the module usually fixes it:
+
+```
+sudo modprobe -r ucsi_acpi && sudo modprobe ucsi_acpi
+```
+
+After this, ports should appear in `/sys/class/typec/` and `usbc status` will
+work.
+
+This is a known issue on some laptops where the EC doesn't respond to the
+initial UCSI probe in time (race condition at boot). If it happens
+consistently, you can add a reload to a udev rule or systemd unit that runs
+after boot. A BIOS/EC firmware update may also fix it permanently.
