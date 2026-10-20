@@ -67,9 +67,17 @@ is shown as a sink and the header notes the stale attribute, e.g.
 `Port 0 [host/sink (kernel says source), PD]`. `--json` reports both as
 `power_role` (the attribute) and `effective_power_role`.
 
+With two chargers plugged in, only one actually charges the computer. The
+other keeps its PD contract, but the PD controller holds its sink path open
+so no current flows. UCSI 2.0 firmware reports this, and the kernel shows it
+as `Not charging` on that port's power supply, so its contract reads e.g.
+`20.0V 3.0A 60W (PD, not charging)`. Older UCSI and other port drivers don't
+report the sink path, so there every sinking contract reads as charging.
+
 Partners and cables that never answered Discover Identity (common with
 chargers, and on machines whose PD firmware doesn't forward identity) still
-show what the kernel knows: PD yes/no, passive/active, plug type, PDOs.
+show what the kernel knows: PD version (or just PD yes/no), passive/active,
+plug type, PDOs.
 
 `usbc status -v` adds a per-field VDO breakdown, the port's own PDOs, the USB
 capability and the partner's full PDO lists. `usbc status --json` prints the
@@ -114,12 +122,15 @@ $ usbc gui
 ```
 
 Opens a window that explains each USB-C port in plain language: what's
-plugged in (dock, display, charger, ...), whether it's charging the computer
-and at how many watts, how fast the cable is, and what to do if the cable is
-holding a device back. For a charger it lists every power mode the charger
-offers (for example 5 V, 9 V, 15 V, 20 V and an adjustable PPS range) and
-marks the one the computer negotiated. It updates live as you plug and unplug
-things.
+plugged in (dock, display, charger, ...) and which USB PD version it speaks,
+which way power flows and how many watts (charging the computer, or the
+computer powering the device), how fast the cable is and whether it carries
+Thunderbolt or DisplayPort, and what to do if the cable is holding a device
+back. For a charger it lists every power mode the charger offers (for
+example 5 V, 9 V, 15 V, 20 V and an adjustable PPS range) and marks the one
+the computer negotiated. A second charger that isn't in use shows as
+**Standing by** with the wattage it has ready. It updates live as you plug
+and unplug things.
 
 On many laptops the window says the computer's firmware doesn't share device
 details. That is a limit of the USB-C controller firmware (UCSI without
@@ -161,6 +172,9 @@ nix develop
 cargo build
 cargo test
 ```
+
+The dev shell sets `LD_LIBRARY_PATH` for the libraries `usbc` links
+against, so `./target/debug/usbc` runs directly as well as via `cargo run`.
 
 ### Cargo (non-Nix)
 
