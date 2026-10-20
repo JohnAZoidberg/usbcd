@@ -119,7 +119,7 @@ pub fn overall(summaries: &[PortSummary]) -> Overall {
 pub fn summarize(port: &Port) -> PortSummary {
     PortSummary {
         number: port.number,
-        device: port.partner.as_ref().map(|p| summarize_device(port, p)),
+        device: summarize_device(port),
         cable: summarize_cable(port.cable.as_ref()),
         issues: quality::check_cable_quality(port)
             .into_iter()
@@ -128,17 +128,44 @@ pub fn summarize(port: &Port) -> PortSummary {
     }
 }
 
-fn summarize_device(port: &Port, partner: &Partner) -> DeviceSummary {
-    let power = match port.power_role {
+fn summarize_device(port: &Port) -> Option<DeviceSummary> {
+    if let Some(partner) = &port.partner {
+        return Some(summarize_partner(port, partner));
+    }
+
+    // The kernel only creates the partner directory once the partner answers
+    // Discover Identity. Some chargers never do, but still negotiate a power
+    // contract, and power_operation_mode is the only trace of that. Without
+    // this the app would claim nothing is plugged in while the laptop charges.
+    if !port.power_operation_mode.has_connection() {
+        return None;
+    }
+    let kind = if port.power_role == PowerRole::Sink {
+        DeviceKind::Charger
+    } else {
+        DeviceKind::Unknown
+    };
+    Some(DeviceSummary {
+        kind,
+        features: vec![],
+        power: power_flow(port, None),
+    })
+}
+
+fn power_flow(port: &Port, partner: Option<&Partner>) -> PowerFlow {
+    match port.power_role {
         PowerRole::Sink => PowerFlow::Receiving {
             max_watts: partner
-                .power
-                .as_ref()
+                .and_then(|p| p.power.as_ref())
                 .and_then(|p| max_fixed_watts(&p.source)),
         },
         PowerRole::Source => PowerFlow::Supplying,
         PowerRole::None => PowerFlow::Unknown,
-    };
+    }
+}
+
+fn summarize_partner(port: &Port, partner: &Partner) -> DeviceSummary {
+    let power = power_flow(port, Some(partner));
 
     let mut features = Vec::new();
     if supports_usb4(partner) {
@@ -319,6 +346,13 @@ mod tests {
         }
     }
 
+    fn port_with_mode(power_role: PowerRole, mode: PowerOpMode) -> Port {
+        Port {
+            power_operation_mode: mode,
+            ..port(power_role, None, None)
+        }
+    }
+
     fn partner(id_header: u32, vdo1: u32, alt_modes: Vec<AltMode>) -> Partner {
         Partner {
             identity: PdIdentity {
@@ -362,6 +396,33 @@ mod tests {
         assert!(s.device.is_none());
         assert!(s.issues.is_empty());
         assert_eq!(overall(&[s]), Overall::NothingConnected);
+    }
+
+    #[test]
+    fn test_silent_charger_is_detected_from_power_mode() {
+        // No partner directory, but the kernel reports a PD contract.
+        let s = summarize(&port_with_mode(PowerRole::Sink, PowerOpMode::UsbPowerDelivery));
+        let device = s.device.as_ref().unwrap();
+        assert_eq!(device.kind, DeviceKind::Charger);
+        assert!(device.features.is_empty());
+        assert_eq!(device.power, PowerFlow::Receiving { max_watts: None });
+        assert_eq!(overall(&[s]), Overall::AllGood);
+    }
+
+    #[test]
+    fn test_silent_partner_while_sourcing_is_unknown() {
+        let s = summarize(&port_with_mode(PowerRole::Source, PowerOpMode::Current30A));
+        let device = s.device.as_ref().unwrap();
+        assert_eq!(device.kind, DeviceKind::Unknown);
+        assert_eq!(device.power, PowerFlow::Supplying);
+    }
+
+    #[test]
+    fn test_idle_power_mode_is_nothing_connected() {
+        for mode in [PowerOpMode::Default, PowerOpMode::None] {
+            let s = summarize(&port_with_mode(PowerRole::Sink, mode));
+            assert!(s.device.is_none());
+        }
     }
 
     #[test]
