@@ -254,10 +254,17 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
         return group;
     };
 
+    // An empty feature list on an unidentified device would look like a bug,
+    // so say why there's nothing to show.
+    let device_detail = if device.identified {
+        device.features.join(" · ")
+    } else {
+        "Device didn't report its details".to_string()
+    };
     group.add(&row(
         device.kind.icon_name(),
         device.kind.label(),
-        &device.features.join(" · "),
+        &device_detail,
     ));
 
     match device.power {

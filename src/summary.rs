@@ -24,6 +24,9 @@ pub struct DeviceSummary {
     /// Short capability tags, e.g. "USB4", "Thunderbolt", "Video".
     pub features: Vec<&'static str>,
     pub power: PowerFlow,
+    /// False when the device never answered Discover Identity, so `kind` is a
+    /// guess from the power role and `features` is necessarily empty.
+    pub identified: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +159,7 @@ fn summarize_device(port: &Port) -> Option<DeviceSummary> {
         kind,
         features: vec![],
         power: power_flow(port, None),
+        identified: false,
     })
 }
 
@@ -207,6 +211,7 @@ fn summarize_partner(port: &Port, partner: &Partner) -> DeviceSummary {
         kind: device_kind(port, partner),
         features,
         power,
+        identified: partner.identity.id_header_vdo != 0,
     }
 }
 
@@ -429,6 +434,7 @@ mod tests {
         let s = summarize(&port_with_mode(PowerRole::Sink, PowerOpMode::UsbPowerDelivery));
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Charger);
+        assert!(!device.identified);
         assert!(device.features.is_empty());
         assert_eq!(
             device.power,
@@ -500,6 +506,7 @@ mod tests {
         ));
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Dock);
+        assert!(device.identified);
         assert_eq!(device.features, vec!["USB4", "Thunderbolt", "Video"]);
         assert_eq!(
             device.power,
@@ -582,7 +589,10 @@ mod tests {
     #[test]
     fn test_unidentified_partner_is_unknown_when_supplying() {
         let s = summarize(&port(PowerRole::Source, Some(partner(0, 0, vec![])), None));
-        assert_eq!(s.device.unwrap().kind, DeviceKind::Unknown);
+        let device = s.device.unwrap();
+        assert_eq!(device.kind, DeviceKind::Unknown);
+        // Partner directory exists but the ID header is zero: still unidentified.
+        assert!(!device.identified);
     }
 
     #[test]
