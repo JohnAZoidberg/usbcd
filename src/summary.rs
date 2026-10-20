@@ -77,6 +77,9 @@ pub enum PowerFlow {
     Receiving {
         max_milliwatts: Option<u32>,
         pd: bool,
+        /// What was actually negotiated, from the kernel's power supply for
+        /// the port (selected PDO voltage times requested current).
+        negotiated_milliwatts: Option<u32>,
     },
     /// The laptop is powering this device.
     Supplying,
@@ -91,6 +94,9 @@ pub enum CableSummary {
         speed: &'static str,
         max_watts: Option<u32>,
     },
+    /// No e-marker identity, but the port driver knows whether the cable is
+    /// active or passive from its own cable query.
+    TypeOnly { active: bool },
     /// No e-marker response: either a cable without one, or the port
     /// couldn't query it (SOP' discovery needs the VCONN source side).
     Unidentified,
@@ -143,11 +149,11 @@ fn summarize_device(port: &Port) -> Option<DeviceSummary> {
         return Some(summarize_partner(port, partner));
     }
 
-    // The kernel only creates the partner directory once the partner answers
-    // Discover Identity. Some chargers never do, but still negotiate a power
-    // contract, and power_operation_mode is the only trace of that. Without
-    // this the app would claim nothing is plugged in while the laptop charges.
-    if !port.power_operation_mode.has_connection() {
+    // No partner device, but the port's power supply says we are sinking:
+    // the kernel knows about a contract before (or without) registering the
+    // partner. power_operation_mode alone is not enough, it can be stale
+    // after a detach.
+    if !port.is_connected() {
         return None;
     }
     let kind = if port.power_role == PowerRole::Sink {
@@ -169,14 +175,23 @@ fn power_flow(port: &Port, partner: Option<&Partner>) -> PowerFlow {
             let pd_milliwatts = partner
                 .and_then(|p| p.power.as_ref())
                 .and_then(|p| max_fixed_milliwatts(&p.source));
+            let contract = port.contract.as_ref().filter(|c| c.online);
             let pd = pd_milliwatts.is_some()
+                || contract.is_some_and(|c| c.pd)
                 || port.power_operation_mode == PowerOpMode::UsbPowerDelivery;
             let max_milliwatts = pd_milliwatts.or_else(|| match port.power_operation_mode {
                 PowerOpMode::Current15A => Some(5000 * 1500 / 1000),
                 PowerOpMode::Current30A => Some(5000 * 3000 / 1000),
                 _ => None,
             });
-            PowerFlow::Receiving { max_milliwatts, pd }
+            let negotiated_milliwatts = contract
+                .filter(|c| c.has_values())
+                .map(|c| c.milliwatts());
+            PowerFlow::Receiving {
+                max_milliwatts,
+                pd,
+                negotiated_milliwatts,
+            }
         }
         PowerRole::Source => PowerFlow::Supplying,
         PowerRole::None => PowerFlow::Unknown,
@@ -276,7 +291,12 @@ fn max_fixed_milliwatts(pdos: &[Pdo]) -> Option<u32> {
 
 fn summarize_cable(cable: Option<&Cable>) -> CableSummary {
     let cable = match cable {
-        Some(c) if c.identity.id_header_vdo != 0 => c,
+        Some(c) if c.identity.is_present() => c,
+        Some(c) if c.cable_type != CableType::Unknown => {
+            return CableSummary::TypeOnly {
+                active: c.cable_type == CableType::Active,
+            }
+        }
         _ => return CableSummary::Unidentified,
     };
     let vdo1 = cable.identity.product_type_vdo1;
@@ -372,7 +392,7 @@ mod tests {
             power_operation_mode: PowerOpMode::Default,
             partner,
             cable,
-            power: None,
+            ..Default::default()
         }
     }
 
@@ -380,6 +400,23 @@ mod tests {
         Port {
             power_operation_mode: mode,
             ..port(power_role, None, None)
+        }
+    }
+
+    /// A port whose power supply reports it sinking, as the kernel does for a
+    /// charger, with or without a partner device.
+    fn sinking_port(mode: PowerOpMode, pd: bool, voltage_mv: u32, current_ma: u32) -> Port {
+        Port {
+            power_operation_mode: mode,
+            contract: Some(Contract {
+                online: true,
+                status: "Charging".into(),
+                pd,
+                voltage_mv,
+                current_ma,
+                ..Default::default()
+            }),
+            ..port(PowerRole::Sink, None, None)
         }
     }
 
@@ -392,7 +429,7 @@ mod tests {
             },
             pd_revision: PdRevision::V3_0,
             alt_modes,
-            power: None,
+            ..Default::default()
         }
     }
 
@@ -405,7 +442,7 @@ mod tests {
             },
             pd_revision: PdRevision::V3_0,
             cable_type: CableType::Passive,
-            plug_alt_modes: vec![],
+            ..Default::default()
         }
     }
 
@@ -429,9 +466,10 @@ mod tests {
     }
 
     #[test]
-    fn test_silent_charger_is_detected_from_power_mode() {
-        // No partner directory, but the kernel reports a PD contract.
-        let s = summarize(&port_with_mode(PowerRole::Sink, PowerOpMode::UsbPowerDelivery));
+    fn test_silent_charger_is_detected_from_power_supply() {
+        // No partner directory, but the port's power supply is online with a
+        // PD contract.
+        let s = summarize(&sinking_port(PowerOpMode::UsbPowerDelivery, true, 20000, 3000));
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Charger);
         assert!(!device.identified);
@@ -440,15 +478,38 @@ mod tests {
             device.power,
             PowerFlow::Receiving {
                 max_milliwatts: None,
-                pd: true
+                pd: true,
+                negotiated_milliwatts: Some(60_000),
             }
         );
         assert_eq!(overall(&[s]), Overall::AllGood);
     }
 
     #[test]
+    fn test_stale_power_mode_alone_is_nothing_connected() {
+        // power_operation_mode still says PD after a detach, no partner, and
+        // the power supply is offline.
+        let mut port = port_with_mode(PowerRole::Sink, PowerOpMode::UsbPowerDelivery);
+        port.contract = Some(Contract {
+            online: false,
+            status: "Not charging".into(),
+            pd: true,
+            ..Default::default()
+        });
+        let s = summarize(&port);
+        assert!(s.device.is_none());
+        assert_eq!(overall(&[s]), Overall::NothingConnected);
+
+        // Without any power supply the mode alone is not trusted either.
+        let s = summarize(&port_with_mode(PowerRole::Sink, PowerOpMode::UsbPowerDelivery));
+        assert!(s.device.is_none());
+    }
+
+    #[test]
     fn test_silent_partner_while_sourcing_is_unknown() {
-        let s = summarize(&port_with_mode(PowerRole::Source, PowerOpMode::Current30A));
+        let mut port = port_with_mode(PowerRole::Source, PowerOpMode::Current30A);
+        port.partner = Some(Partner::default());
+        let s = summarize(&port);
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Unknown);
         assert_eq!(device.power, PowerFlow::Supplying);
@@ -456,12 +517,13 @@ mod tests {
 
     #[test]
     fn test_legacy_current_is_reported_as_watts() {
-        let s = summarize(&port_with_mode(PowerRole::Sink, PowerOpMode::Current15A));
+        let s = summarize(&sinking_port(PowerOpMode::Current15A, false, 5000, 1500));
         assert_eq!(
             s.device.unwrap().power,
             PowerFlow::Receiving {
                 max_milliwatts: Some(7_500),
-                pd: false
+                pd: false,
+                negotiated_milliwatts: Some(7_500),
             }
         );
 
@@ -472,9 +534,24 @@ mod tests {
             summarize(&port).device.unwrap().power,
             PowerFlow::Receiving {
                 max_milliwatts: Some(15_000),
-                pd: false
+                pd: false,
+                negotiated_milliwatts: None,
             }
         );
+    }
+
+    #[test]
+    fn test_cable_known_only_to_the_kernel() {
+        let cable = Cable {
+            cable_type: CableType::Passive,
+            plug_type: Some("type-c".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            summarize_cable(Some(&cable)),
+            CableSummary::TypeOnly { active: false }
+        );
+        assert_eq!(summarize_cable(Some(&Cable::default())), CableSummary::Unidentified);
     }
 
     #[test]
@@ -512,7 +589,8 @@ mod tests {
             device.power,
             PowerFlow::Receiving {
                 max_milliwatts: None,
-                pd: false
+                pd: false,
+                negotiated_milliwatts: None,
             }
         );
         assert_eq!(
@@ -550,7 +628,8 @@ mod tests {
             device.power,
             PowerFlow::Receiving {
                 max_milliwatts: Some(65_000),
-                pd: true
+                pd: true,
+                negotiated_milliwatts: None,
             }
         );
         assert_eq!(s.cable, CableSummary::Unidentified);
@@ -617,7 +696,7 @@ mod tests {
             },
             pd_revision: PdRevision::V3_0,
             cable_type: CableType::Active,
-            plug_alt_modes: vec![],
+            ..Default::default()
         };
         assert_eq!(
             summarize_cable(Some(&cable)),

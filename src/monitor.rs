@@ -2,47 +2,100 @@ use std::collections::HashMap;
 use std::os::unix::io::AsRawFd;
 use std::time::Duration;
 
+use crate::display;
 use crate::notify;
 use crate::quality;
 use crate::sysfs;
-use crate::types::{CableWarning, Port};
+use crate::types::{CableWarning, Contract, DataRole, Port, PowerRole};
 use crate::vdo;
 
-/// Run the udev monitor loop: watch for typec events, debounce, check quality,
-/// and send desktop notifications.
+/// Local time as `YYYY-MM-DD HH:MM:SS` for the event log. journald adds its
+/// own stamps, but the monitor is also run from a terminal.
+pub fn timestamp() -> String {
+    let mut now: libc::time_t = 0;
+    // SAFETY: plain libc calls on stack-owned values.
+    unsafe {
+        libc::time(&mut now);
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut tm);
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    }
+}
+
+macro_rules! log {
+    ($($arg:tt)*) => {
+        eprintln!("{} {}", timestamp(), format!($($arg)*))
+    };
+}
+
+/// What the monitor compares between scans to decide what to log.
+#[derive(Clone, PartialEq)]
+struct PortState {
+    connected: bool,
+    power_role: PowerRole,
+    data_role: DataRole,
+    contract: Option<Contract>,
+    warnings: Vec<CableWarning>,
+}
+
+fn state_of(port: &Port) -> PortState {
+    PortState {
+        connected: port.is_connected(),
+        power_role: port.power_role,
+        data_role: port.data_role,
+        contract: if port.is_connected() {
+            port.contract.clone()
+        } else {
+            None
+        },
+        warnings: quality::check_cable_quality(port),
+    }
+}
+
+/// Run the udev monitor loop: watch for typec events, debounce, log what
+/// changed, check quality, and send desktop notifications.
 pub async fn run_monitor() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("usbc monitor: starting...");
+    log!("usbc monitor: starting");
 
     // Initial scan of already-connected devices.
     let ports = sysfs::scan_ports();
-    log_initial_state(&ports);
+    if ports.is_empty() {
+        log!("  no USB-C ports found");
+    }
+    let mut prev: HashMap<u32, PortState> = HashMap::new();
     for port in &ports {
-        let warnings = quality::check_cable_quality(port);
-        for w in &warnings {
-            eprintln!("  port {}: {w}", port.number);
+        let state = state_of(port);
+        if state.connected {
+            log_connect(port);
+        }
+        for w in &state.warnings {
+            log!("  port {}: {w}", port.number);
             if let Err(e) = notify::send_notification(port.number, w).await {
-                eprintln!("  failed to send notification: {e}");
+                log!("  failed to send notification: {e}");
             }
         }
-    }
-
-    // Track previous state per port.
-    let mut prev_connected: HashMap<u32, bool> = HashMap::new();
-    let mut prev_warnings: HashMap<u32, Vec<CableWarning>> = HashMap::new();
-    for port in &ports {
-        prev_connected.insert(port.number, port.partner.is_some());
-        prev_warnings.insert(port.number, quality::check_cable_quality(port));
+        prev.insert(port.number, state);
     }
 
     let mut rx = spawn_udev_watcher();
 
-    eprintln!("usbc monitor: watching for USB-C events...");
+    log!("usbc monitor: watching for USB-C events");
 
+    // A single plug produces a burst of partner, cable, alt mode and PDO
+    // uevents over a second or two while the kernel runs discovery.
     let debounce = Duration::from_millis(2000);
 
     loop {
         if rx.recv().await.is_none() {
-            eprintln!("usbc monitor: udev thread exited");
+            log!("usbc monitor: udev thread exited");
             break;
         }
 
@@ -51,40 +104,57 @@ pub async fn run_monitor() -> Result<(), Box<dyn std::error::Error>> {
 
         let ports = sysfs::scan_ports();
         for port in &ports {
-            let was_connected = prev_connected.get(&port.number).copied().unwrap_or(false);
-            let is_connected = port.partner.is_some();
+            let new = state_of(port);
+            let n = port.number;
 
-            // Log connection changes.
-            if is_connected && !was_connected {
-                log_connect(port);
-            } else if !is_connected && was_connected {
-                eprintln!("port {}: disconnected", port.number);
-            }
-
-            // Check for new warnings.
-            let warnings = quality::check_cable_quality(port);
-            let prev = prev_warnings.get(&port.number);
-            for w in &warnings {
-                let is_new = match prev {
-                    Some(pw) => !pw.contains(w),
-                    None => true,
-                };
-                if is_new {
-                    eprintln!("  port {}: {w}", port.number);
-                    if let Err(e) = notify::send_notification(port.number, w).await {
-                        eprintln!("  failed to send notification: {e}");
+            match prev.get(&n) {
+                None => {
+                    if new.connected {
+                        log_connect(port);
+                    }
+                }
+                Some(old) => {
+                    if new.connected && !old.connected {
+                        log_connect(port);
+                    } else if !new.connected && old.connected {
+                        log!("port {n}: disconnected");
+                    } else if new.connected {
+                        if new.power_role != old.power_role {
+                            log!("port {n}: power role {} → {}", old.power_role, new.power_role);
+                        }
+                        if new.data_role != old.data_role {
+                            log!("port {n}: data role {} → {}", old.data_role, new.data_role);
+                        }
+                        if new.contract != old.contract {
+                            match display::contract_summary(port) {
+                                Some(text) => log!("port {n}: contract {text}"),
+                                None => log!("port {n}: contract ended"),
+                            }
+                        }
                     }
                 }
             }
 
-            prev_connected.insert(port.number, is_connected);
-            prev_warnings.insert(port.number, warnings);
+            // Notify on warnings that weren't there before.
+            for w in &new.warnings {
+                let is_new = match prev.get(&n) {
+                    Some(old) => !old.warnings.contains(w),
+                    None => true,
+                };
+                if is_new {
+                    log!("  port {n}: {w}");
+                    if let Err(e) = notify::send_notification(n, w).await {
+                        log!("  failed to send notification: {e}");
+                    }
+                }
+            }
+
+            prev.insert(n, new);
         }
 
         // Clean up ports that disappeared.
         let active: Vec<u32> = ports.iter().map(|p| p.number).collect();
-        prev_connected.retain(|k, _| active.contains(k));
-        prev_warnings.retain(|k, _| active.contains(k));
+        prev.retain(|k, _| active.contains(k));
     }
 
     Ok(())
@@ -99,6 +169,7 @@ pub fn spawn_udev_watcher() -> tokio::sync::mpsc::UnboundedReceiver<()> {
         let socket = match udev::MonitorBuilder::new()
             .and_then(|b| b.match_subsystem("typec"))
             .and_then(|b| b.match_subsystem("usb_power_delivery"))
+            .and_then(|b| b.match_subsystem("power_supply"))
             .and_then(|b| b.listen())
         {
             Ok(s) => s,
@@ -135,48 +206,50 @@ pub fn spawn_udev_watcher() -> tokio::sync::mpsc::UnboundedReceiver<()> {
     rx
 }
 
-fn log_initial_state(ports: &[Port]) {
-    if ports.is_empty() {
-        eprintln!("  no USB-C ports found");
-        return;
-    }
-    for port in ports {
-        if port.partner.is_some() {
-            log_connect(port);
-        }
-    }
-}
-
 fn log_connect(port: &Port) {
-    let partner = match &port.partner {
-        Some(p) => p,
-        None => return,
-    };
-
-    let product_type = vdo::field(
-        partner.identity.id_header_vdo,
-        vdo::ID_HEADER_VDO_PRODUCT_TYPE_OFFSET,
-        vdo::ID_HEADER_VDO_PRODUCT_TYPE_MASK,
-    );
-    let type_str = match product_type {
-        vdo::ID_HEADER_VDO_PRODUCT_TYPE_UFP_HUB => "hub",
-        vdo::ID_HEADER_VDO_PRODUCT_TYPE_UFP_PERIPHERAL => "peripheral",
-        vdo::ID_HEADER_VDO_PRODUCT_TYPE_UFP_AMA => "alt mode adapter",
-        _ => "device",
+    let who = match &port.partner {
+        Some(partner) if partner.identity.is_present() => {
+            let product_type = vdo::field(
+                partner.identity.id_header_vdo,
+                vdo::ID_HEADER_VDO_PRODUCT_TYPE_OFFSET,
+                vdo::ID_HEADER_VDO_PRODUCT_TYPE_MASK,
+            );
+            match product_type {
+                vdo::ID_HEADER_VDO_PRODUCT_TYPE_UFP_HUB => "hub",
+                vdo::ID_HEADER_VDO_PRODUCT_TYPE_UFP_PERIPHERAL => "peripheral",
+                vdo::ID_HEADER_VDO_PRODUCT_TYPE_UFP_AMA => "alt mode adapter",
+                _ => "device",
+            }
+            .to_string()
+        }
+        Some(_) => match port.partner_supports_pd() {
+            Some(true) => "PD device (no identity)".to_string(),
+            Some(false) => "non-PD device".to_string(),
+            None => "device (no identity)".to_string(),
+        },
+        None => "partner (no partner device yet)".to_string(),
     };
 
     let cable_str = match &port.cable {
-        Some(c) => {
+        Some(c) if c.identity.is_present() => {
             let speed = c.identity.product_type_vdo1 & vdo::USB_SPEED_MASK;
             let speed_name = vdo::usb_speed_name(speed, c.pd_revision);
             format!("{} cable ({})", c.cable_type, speed_name)
         }
+        Some(c) => match &c.plug_type {
+            Some(plug) => format!("{} cable, {plug} plug, no e-marker data", c.cable_type),
+            None => format!("{} cable, no e-marker data", c.cable_type),
+        },
         None => "no cable info".to_string(),
     };
 
-    eprintln!(
-        "port {}: connected — {} [{}/{}], {}",
-        port.number, type_str, port.data_role, port.power_role, cable_str
+    let contract_str = display::contract_summary(port)
+        .map(|c| format!(", contract {c}"))
+        .unwrap_or_default();
+
+    log!(
+        "port {}: connected — {who} [{}/{}], {cable_str}{contract_str}",
+        port.number, port.data_role, port.power_role
     );
 }
 
@@ -198,5 +271,13 @@ mod tests {
         assert_eq!(extract_port_number("port1-cable"), Some(1));
         assert_eq!(extract_port_number("port12-plug0"), Some(12));
         assert_eq!(extract_port_number("something"), None);
+    }
+
+    #[test]
+    fn test_timestamp_shape() {
+        let ts = timestamp();
+        assert_eq!(ts.len(), 19);
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[10..11], " ");
     }
 }

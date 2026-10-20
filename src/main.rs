@@ -1,6 +1,7 @@
 mod display;
 #[cfg(feature = "gui")]
 mod gui;
+mod json;
 mod monitor;
 mod notify;
 mod quality;
@@ -24,13 +25,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Show USB-C port state, connected devices, cable info, and quality warnings
+    /// Show USB-C port state, connected devices, cable info, contract and quality warnings
     Status {
         /// Show verbose VDO field breakdown and per-PDO listing
         #[arg(short, long)]
         verbose: bool,
+        /// Print the port state as JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
-    /// Watch for USB-C events and send desktop notifications for cable quality issues
+    /// Watch for USB-C events, log connection and contract changes, and send
+    /// desktop notifications for cable quality issues
     Monitor,
     /// Open a window showing USB-C status in plain language
     #[cfg(feature = "gui")]
@@ -42,9 +47,16 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Status { verbose } => {
+        Commands::Status { verbose, json } => {
             let ports = sysfs::scan_ports();
-            let has_warnings = display::print_status(&ports, verbose);
+            let has_warnings = if json {
+                print!("{}", json::render_json(&ports));
+                ports
+                    .iter()
+                    .any(|p| !quality::check_cable_quality(p).is_empty())
+            } else {
+                display::print_status(&ports, verbose)
+            };
             if has_warnings {
                 std::process::exit(1);
             }

@@ -29,21 +29,50 @@ desktops (GNOME, KDE, Sway) have no equivalent. This tool fills that gap.
 
 ```
 $ usbc status
-Port 0 [host/source]
+Port 0 [host/source, PD, CC1]
   Partner: hub (PD 3.1, USB4)
     Alt Modes: DP (0xff01), TBT (0x8087)
-  Cable: passive (PD 3.0, USB 3.2 Gen2)
+    Port can source: 5V 3A 15W
+  Contract: 5.0V 3.0A 15W (PD, supplying)
+  Cable: passive (PD 3.0, USB 3.2 Gen2, type-c plug)
   Warnings:
     ⚠ Cable is limiting connection speed — device supports faster speeds than the cable allows
 
-Port 1 [host/source]
+Port 1 [host/sink, PD]
+  Partner: device (PD, no identity reported)
+    Partner can source: 5/9/15/20V 3A 60W (PPS 3.3-21.0V)
+  Contract: 20.0V 3.0A 60W (PD, charging)
+  Cable: passive (type-c plug, no e-marker data)
+
+Port 2 [device/sink]
   (nothing connected)
 ```
+
+The `Contract` line is what was actually negotiated, taken from the kernel's
+`ucsi-source-psy-*` / `tcpm-source-psy-*` power supply next to the port: the
+selected PDO's voltage and the requested current, or the Type-C current level
+without PD. The kernel derives these from the RDO; nothing is measured. While
+the computer is the source under PD the kernel exposes no values, and the line
+says so.
+
+A port counts as connected when the kernel registered a partner device or the
+power supply reports it `online`. `power_operation_mode` alone is not trusted:
+some UCSI firmware never clears it after a detach, and it would otherwise show
+a charger that is long gone.
+
+Partners and cables that never answered Discover Identity (common with
+chargers, and on machines whose PD firmware doesn't forward identity) still
+show what the kernel knows: PD yes/no, passive/active, plug type, PDOs.
+
+`usbc status -v` adds a per-field VDO breakdown, the port's own PDOs, the USB
+capability and the partner's full PDO lists. `usbc status --json` prints the
+same model as one JSON document for scripts.
 
 Exit code is 1 if any warnings were emitted, 0 if clean. Useful in scripts:
 
 ```sh
 usbc status || echo "Check your USB-C cables"
+usbc status --json | jq '.ports[] | select(.connected) | .contract'
 ```
 
 ### Background monitor with desktop notifications
@@ -52,10 +81,21 @@ usbc status || echo "Check your USB-C cables"
 $ usbc monitor
 ```
 
-Watches for udev `typec` subsystem events. When a device is plugged in, it
-waits for the kernel to finish enumeration (500 ms debounce), runs the quality
-checks, and sends a freedesktop.org desktop notification if the cable is
-suboptimal. Already-connected devices are scanned on startup.
+Watches for udev `typec`, `usb_power_delivery` and `power_supply` events. When
+something changes, it waits for the kernel to finish discovery (2 s debounce),
+rescans, runs the quality checks, and sends a freedesktop.org desktop
+notification if the cable is suboptimal. Already-connected devices are scanned
+on startup.
+
+It also keeps a timestamped event log on stderr: connect and disconnect with
+the partner, cable and contract, power and data role swaps, and every contract
+change. That is the cheapest unprivileged history of what the ports did:
+
+```
+2026-10-20 15:41:02 port 2: connected — PD device (no identity) [host/sink], passive cable, type-c plug, no e-marker data, contract 20.0V 3.0A 60W (PD, charging)
+2026-10-20 15:41:30 port 2: contract 9.0V 3.0A 27W (PD, charging)
+2026-10-20 15:42:11 port 2: disconnected
+```
 
 Notifications are sent via D-Bus (`org.freedesktop.Notifications`) and work
 with any compliant notification daemon (mako, dunst, GNOME Shell, KDE).
@@ -171,7 +211,9 @@ systemctl --user enable --now usbc-monitor
 ```
 
 The service starts after `graphical-session.target` so that the D-Bus session
-bus and a notification daemon are available.
+bus and a notification daemon are available. It runs `usbc` from your `PATH`
+via `/usr/bin/env`; edit `ExecStart` if user services don't see your install
+location.
 
 Check logs with:
 ```sh
@@ -180,15 +222,22 @@ journalctl --user -u usbc-monitor
 
 ## How it works
 
-1. **sysfs reader** -- Enumerates `/sys/class/typec/portN`, reads PD identity
-   VDOs, PD revision, data/power roles, and alt modes for partners and cables.
+1. **sysfs reader** -- Enumerates `/sys/class/typec/portN`, reads data/power
+   roles, orientation, USB capability, PD identity VDOs, PD revision, alt modes
+   and PDO lists (fixed, variable, battery, PPS, SPR AVS) for the port, the
+   partner and the cable, plus the kernel's own cable `type`/`plug_type` and
+   partner flags. The negotiated contract comes from the port's
+   `*-source-psy-*` power supply.
 
 2. **Quality checks** -- Ported from typecd's `cable.cc`, `partner.cc`,
    `port.cc`, and `port_manager.cc`. Evaluates whether the cable supports the
-   partner's best mode (USB4 > TBT > DP) and whether it limits USB speed.
+   partner's best mode (USB4 > TBT > DP) and whether it limits USB speed. They
+   need identity VDOs, so they stay silent for partners and cables that didn't
+   report any.
 
-3. **udev monitor** -- Subscribes to the `typec` subsystem, debounces rapid
-   event bursts from a single plug event, then re-scans and evaluates.
+3. **udev monitor** -- Subscribes to the `typec`, `usb_power_delivery` and
+   `power_supply` subsystems, debounces rapid event bursts from a single plug
+   event, then re-scans, logs what changed and evaluates.
 
 4. **Notifications** -- Sends desktop notifications via the standard
    `org.freedesktop.Notifications` D-Bus interface using zbus.

@@ -5,7 +5,9 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/usbc monitor
+# Looked up in the user's PATH, so it works for cargo, distro and nix installs.
+# Replace with an absolute path if your PATH isn't set for user services.
+ExecStart=/usr/bin/env usbc monitor
 Restart=on-failure
 RestartSec=5
 

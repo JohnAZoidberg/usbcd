@@ -47,25 +47,99 @@ pub fn render_status(ports: &[Port], verbose: bool) -> (String, bool) {
     (buf, any_warnings)
 }
 
-fn write_port(out: &mut String, port: &Port, verbose: bool) {
-    // Annotate the header with the operation mode whenever a partner is
-    // electrically connected — this is the only signal we have when the kernel
-    // didn't expose a portN-partner directory (e.g. partner ignored Discover
-    // Identity but a PD power contract is still in force).
-    let mode_tag = match &port.power_operation_mode {
-        PowerOpMode::UsbPowerDelivery => ", PD",
-        PowerOpMode::Current15A => ", USB 1.5A",
-        PowerOpMode::Current30A => ", USB 3.0A",
-        PowerOpMode::Other(_) => ", connected",
-        PowerOpMode::Default | PowerOpMode::None => "",
+/// One line describing the negotiated power, e.g. "20.0V 3.0A 60W (PD,
+/// charging)". None when nothing is connected or the kernel has no values.
+pub fn contract_summary(port: &Port) -> Option<String> {
+    let c = port.contract.as_ref()?;
+    if !port.is_connected() {
+        return None;
+    }
+    let kind = if c.pps {
+        "PPS"
+    } else if c.pd {
+        "PD"
+    } else {
+        match port.power_operation_mode {
+            PowerOpMode::Current15A => "USB Type-C 1.5A",
+            PowerOpMode::Current30A => "USB Type-C 3.0A",
+            _ => "USB default",
+        }
     };
+    let values = || {
+        format!(
+            "{:.1}V {:.1}A {}W",
+            c.voltage_mv as f64 / 1000.0,
+            c.current_ma as f64 / 1000.0,
+            c.milliwatts() / 1000
+        )
+    };
+    match port.power_role {
+        PowerRole::Sink => Some(if c.has_values() {
+            format!("{} ({kind}, {})", values(), c.status.to_lowercase())
+        } else {
+            format!("{kind}, {}", c.status.to_lowercase())
+        }),
+        PowerRole::Source => {
+            if c.has_values() {
+                Some(format!("{} ({kind}, supplying)", values()))
+            } else if c.pd {
+                // The kernel resolves the RDO against the partner's source
+                // PDOs, which it only has while sinking.
+                Some("PD, supplying (values not exposed by the kernel while sourcing)".to_string())
+            } else {
+                None
+            }
+        }
+        PowerRole::None => None,
+    }
+}
+
+fn write_port(out: &mut String, port: &Port, verbose: bool) {
+    let mut tags = Vec::new();
+    // The mode is a label only; see PowerOpMode. It is shown when something
+    // is connected, where it is fresh.
+    if port.is_connected() {
+        match &port.power_operation_mode {
+            PowerOpMode::UsbPowerDelivery => tags.push("PD".to_string()),
+            PowerOpMode::Current15A => tags.push("USB 1.5A".to_string()),
+            PowerOpMode::Current30A => tags.push("USB 3.0A".to_string()),
+            PowerOpMode::Other(s) => tags.push(s.clone()),
+            PowerOpMode::Default | PowerOpMode::None => {}
+        }
+        match port.orientation {
+            Some(Orientation::Normal) => tags.push("CC1".to_string()),
+            Some(Orientation::Reverse) => tags.push("CC2".to_string()),
+            _ => {}
+        }
+        if port.vconn_source == Some(true) {
+            tags.push("VCONN".to_string());
+        }
+    }
+    let tag_str = tags
+        .iter()
+        .map(|t| format!(", {t}"))
+        .collect::<String>();
     w!(
         out,
-        "Port {} [{}/{}{mode_tag}]",
+        "Port {} [{}/{}{tag_str}]",
         port.number, port.data_role, port.power_role
     );
 
     if verbose {
+        if !port.usb_capability.is_empty() {
+            let caps: Vec<String> = port
+                .usb_capability
+                .iter()
+                .map(|c| {
+                    if port.usb_capability_default.as_deref() == Some(c) {
+                        format!("[{c}]")
+                    } else {
+                        c.clone()
+                    }
+                })
+                .collect();
+            w!(out, "  USB capability: {}", caps.join(" "));
+        }
         if let Some(power) = &port.power {
             if !power.source.is_empty() {
                 w!(out, "  Port Source Capabilities:");
@@ -81,20 +155,18 @@ fn write_port(out: &mut String, port: &Port, verbose: bool) {
     match &port.partner {
         Some(partner) => write_partner(out, partner, port, verbose),
         None => {
-            // No partner directory in sysfs. If the kernel reports an active
-            // power contract anyway, surface that — otherwise the user is left
-            // believing nothing is plugged in even though a charger is.
-            if port.power_operation_mode.has_connection() {
-                w!(
-                    out,
-                    "  Partner: connected ({} — no PD identity reported)",
-                    port.power_operation_mode
-                );
-                write_local_power_summary(out, port, verbose);
+            if port.is_connected() {
+                // The power supply says we are sinking but the partner device
+                // isn't registered (yet).
+                w!(out, "  Partner: connected (no partner device reported by the kernel)");
             } else {
                 w!(out, "  (nothing connected)");
             }
         }
+    }
+
+    if let Some(contract) = contract_summary(port) {
+        w!(out, "  Contract: {contract}");
     }
 
     if let Some(cable) = &port.cable {
@@ -102,31 +174,8 @@ fn write_port(out: &mut String, port: &Port, verbose: bool) {
     }
 }
 
-/// Write a one-line summary of the port's own PD capabilities, chosen by the
-/// active power role. For a sink port this is the laptop's input limit; for a
-/// source port this is what the laptop offers. Skipped in verbose mode because
-/// the full PDO list is written above.
-fn write_local_power_summary(out: &mut String, port: &Port, verbose: bool) {
-    if verbose {
-        return;
-    }
-    let Some(power) = &port.power else { return };
-    match port.power_role {
-        PowerRole::Sink if !power.sink.is_empty() => {
-            w!(out, "    Port can sink: {}", format_power_summary(&power.sink));
-        }
-        PowerRole::Source if !power.source.is_empty() => {
-            w!(
-                out,
-                "    Port can source: {}",
-                format_power_summary(&power.source)
-            );
-        }
-        _ => {}
-    }
-}
-
 fn write_partner(out: &mut String, partner: &Partner, port: &Port, verbose: bool) {
+    let identified = partner.identity.is_present();
     let product_type = vdo::field(
         partner.identity.id_header_vdo,
         vdo::ID_HEADER_VDO_PRODUCT_TYPE_OFFSET,
@@ -142,9 +191,23 @@ fn write_partner(out: &mut String, partner: &Partner, port: &Port, verbose: bool
     let mut caps = Vec::new();
     if partner.pd_revision != PdRevision::None {
         caps.push(format!("{}", partner.pd_revision));
+    } else {
+        match port.partner_supports_pd() {
+            Some(true) => caps.push("PD".to_string()),
+            Some(false) => caps.push("no PD".to_string()),
+            None => {}
+        }
     }
     if partner_has_usb4(partner) {
         caps.push("USB4".to_string());
+    }
+    if let Some(mode) = &partner.accessory_mode {
+        if mode != "none" {
+            caps.push(format!("{mode} accessory"));
+        }
+    }
+    if !identified {
+        caps.push("no identity reported".to_string());
     }
     let caps_str = if caps.is_empty() {
         String::new()
@@ -231,30 +294,22 @@ fn write_partner(out: &mut String, partner: &Partner, port: &Port, verbose: bool
             })
             .collect();
         w!(out, "    Alt Modes: {}", modes.join(", "));
+    } else if partner.num_alt_modes == Some(0) && identified {
+        w!(out, "    Alt Modes: none");
     }
 
     // Power info
     if !verbose {
-        // Normal mode: one-line power summary. Show the *relevant* side of the
-        // port's caps based on the active power role — source-caps when the
-        // laptop is sourcing, sink-caps when sinking (the input limit).
+        // Normal mode: one-line summaries. What the laptop offers when it is
+        // sourcing, and what the partner offers. The laptop's own sink
+        // capabilities are not the contract, so they only appear in verbose.
         if let Some(power) = &port.power {
-            match port.power_role {
-                PowerRole::Source if !power.source.is_empty() => {
-                    w!(
-                        out,
-                        "    Port can source: {}",
-                        format_power_summary(&power.source)
-                    );
-                }
-                PowerRole::Sink if !power.sink.is_empty() => {
-                    w!(
-                        out,
-                        "    Port can sink: {}",
-                        format_power_summary(&power.sink)
-                    );
-                }
-                _ => {}
+            if port.power_role == PowerRole::Source && !power.source.is_empty() {
+                w!(
+                    out,
+                    "    Port can source: {}",
+                    format_power_summary(&power.source)
+                );
             }
         }
         if let Some(power) = &partner.power {
@@ -289,14 +344,24 @@ fn write_partner(out: &mut String, partner: &Partner, port: &Port, verbose: bool
 }
 
 fn write_cable(out: &mut String, cable: &Cable, verbose: bool) {
-    let speed = cable.identity.product_type_vdo1 & vdo::USB_SPEED_MASK;
-    let speed_str = vdo::usb_speed_name(speed, cable.pd_revision);
+    let identified = cable.identity.is_present();
 
     let mut info = Vec::new();
     if cable.pd_revision != PdRevision::None {
         info.push(format!("{}", cable.pd_revision));
     }
-    info.push(speed_str.to_string());
+    if identified {
+        let speed = cable.identity.product_type_vdo1 & vdo::USB_SPEED_MASK;
+        info.push(vdo::usb_speed_name(speed, cable.pd_revision).to_string());
+    }
+    if let Some(plug) = &cable.plug_type {
+        if plug != "unknown" {
+            info.push(format!("{plug} plug"));
+        }
+    }
+    if !identified {
+        info.push("no e-marker data".to_string());
+    }
     let info_str = if info.is_empty() {
         String::new()
     } else {
@@ -442,6 +507,14 @@ fn format_pdo(pdo: &Pdo) -> String {
             *max_voltage_mv as f64 / 1000.0,
             *max_current_ma as f64 / 1000.0,
         ),
+        Pdo::SprAvs {
+            max_current_9v_to_15v_ma,
+            max_current_15v_to_20v_ma,
+        } => format!(
+            "9.0-20.0V {:.2}A (to 15V) / {:.2}A (to 20V) [SPR AVS]",
+            *max_current_9v_to_15v_ma as f64 / 1000.0,
+            *max_current_15v_to_20v_ma as f64 / 1000.0,
+        ),
     }
 }
 
@@ -452,6 +525,7 @@ fn format_power_summary(pdos: &[Pdo]) -> String {
     let mut max_current_ma: u32 = 0;
     let mut max_power_mw: u64 = 0;
     let mut pps_ranges = Vec::new();
+    let mut has_avs = false;
 
     for pdo in pdos {
         match pdo {
@@ -475,6 +549,7 @@ fn format_power_summary(pdos: &[Pdo]) -> String {
             } => {
                 pps_ranges.push((*min_voltage_mv, *max_voltage_mv));
             }
+            Pdo::SprAvs { .. } => has_avs = true,
             _ => {}
         }
     }
@@ -521,6 +596,158 @@ fn format_power_summary(pdos: &[Pdo]) -> String {
             .collect();
         result.push_str(&format!(" (PPS {})", pps_strs.join(", ")));
     }
+    if has_avs {
+        result.push_str(" (AVS)");
+    }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sink_port(contract: Option<Contract>, partner: Option<Partner>) -> Port {
+        Port {
+            number: 2,
+            data_role: DataRole::Host,
+            power_role: PowerRole::Sink,
+            power_operation_mode: PowerOpMode::UsbPowerDelivery,
+            contract,
+            partner,
+            ..Default::default()
+        }
+    }
+
+    fn charging(voltage_mv: u32, current_ma: u32) -> Contract {
+        Contract {
+            online: true,
+            status: "Charging".into(),
+            pd: true,
+            voltage_mv,
+            current_ma,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_contract_line_while_sinking() {
+        let port = sink_port(Some(charging(20000, 3000)), None);
+        assert_eq!(
+            contract_summary(&port).as_deref(),
+            Some("20.0V 3.0A 60W (PD, charging)")
+        );
+        let (text, warnings) = render_status(&[port], false);
+        assert!(!warnings);
+        assert!(text.contains("Port 2 [host/sink, PD]\n"));
+        assert!(text.contains("  Partner: connected (no partner device reported by the kernel)\n"));
+        assert!(text.contains("  Contract: 20.0V 3.0A 60W (PD, charging)\n"));
+        assert!(!text.contains("Port can sink"));
+    }
+
+    #[test]
+    fn test_stale_mode_without_supply_online_is_nothing_connected() {
+        let offline = Contract {
+            online: false,
+            status: "Not charging".into(),
+            pd: true,
+            ..Default::default()
+        };
+        let port = sink_port(Some(offline), None);
+        assert_eq!(contract_summary(&port), None);
+        let (text, _) = render_status(&[port], false);
+        assert!(text.contains("Port 2 [host/sink]\n"));
+        assert!(text.contains("  (nothing connected)\n"));
+    }
+
+    #[test]
+    fn test_type_c_source_contract() {
+        let port = Port {
+            number: 3,
+            data_role: DataRole::Host,
+            power_role: PowerRole::Source,
+            power_operation_mode: PowerOpMode::Current30A,
+            orientation: Some(Orientation::Reverse),
+            partner: Some(Partner {
+                supports_pd: Some(false),
+                ..Default::default()
+            }),
+            contract: Some(Contract {
+                online: false,
+                status: "Discharging".into(),
+                voltage_mv: 5000,
+                current_ma: 3000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (text, _) = render_status(&[port], false);
+        assert!(text.contains("Port 3 [host/source, USB 3.0A, CC2]\n"));
+        assert!(text.contains("  Partner: device (no PD, no identity reported)\n"));
+        assert!(text.contains("  Contract: 5.0V 3.0A 15W (USB Type-C 3.0A, supplying)\n"));
+    }
+
+    #[test]
+    fn test_cable_without_identity_uses_kernel_attributes() {
+        let port = sink_port(
+            Some(charging(20000, 3000)),
+            Some(Partner {
+                supports_pd: Some(true),
+                ..Default::default()
+            }),
+        );
+        let port = Port {
+            cable: Some(Cable {
+                cable_type: CableType::Passive,
+                plug_type: Some("type-c".into()),
+                ..Default::default()
+            }),
+            ..port
+        };
+        let (text, _) = render_status(&[port], false);
+        assert!(text.contains("  Partner: device (PD, no identity reported)\n"));
+        assert!(text.contains("  Cable: passive (type-c plug, no e-marker data)\n"));
+    }
+
+    #[test]
+    fn test_contract_overrides_stale_partner_pd_flag() {
+        let port = sink_port(
+            Some(charging(20000, 3000)),
+            Some(Partner {
+                supports_pd: Some(false),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(port.partner_supports_pd(), Some(true));
+        let (text, _) = render_status(&[port], false);
+        assert!(text.contains("  Partner: device (PD, no identity reported)\n"));
+    }
+
+    #[test]
+    fn test_pd_source_without_values() {
+        let port = Port {
+            power_role: PowerRole::Source,
+            power_operation_mode: PowerOpMode::UsbPowerDelivery,
+            partner: Some(Partner::default()),
+            contract: Some(Contract {
+                pd: true,
+                status: "Discharging".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            contract_summary(&port).as_deref(),
+            Some("PD, supplying (values not exposed by the kernel while sourcing)")
+        );
+    }
+
+    #[test]
+    fn test_format_avs_pdo() {
+        let s = format_pdo(&Pdo::SprAvs {
+            max_current_9v_to_15v_ma: 3000,
+            max_current_15v_to_20v_ma: 2250,
+        });
+        assert_eq!(s, "9.0-20.0V 3.00A (to 15V) / 2.25A (to 20V) [SPR AVS]");
+    }
 }

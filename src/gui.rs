@@ -268,15 +268,29 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
     ));
 
     match device.power {
-        PowerFlow::Receiving { max_milliwatts, pd } => {
-            let detail = match (max_milliwatts, pd) {
-                (Some(mw), true) => format!("Up to {} available", summary::format_watts(mw)),
+        PowerFlow::Receiving {
+            max_milliwatts,
+            pd,
+            negotiated_milliwatts,
+        } => {
+            let detail = match (negotiated_milliwatts, max_milliwatts, pd) {
+                (Some(now), Some(mw), true) if mw > now => format!(
+                    "Charging at {}, up to {} available",
+                    summary::format_watts(now),
+                    summary::format_watts(mw)
+                ),
+                (Some(now), _, true) => format!("Charging at {}", summary::format_watts(now)),
+                (None, Some(mw), true) => format!("Up to {} available", summary::format_watts(mw)),
                 // No PD contract: plain 5 V charging, which is why it's slow.
-                (Some(mw), false) => format!(
+                (_, Some(mw), false) => format!(
                     "Basic USB charging, up to {}. Fast charging isn't available",
                     summary::format_watts(mw)
                 ),
-                (None, _) => "Power available".to_string(),
+                (Some(now), None, false) => format!(
+                    "Basic USB charging at {}. Fast charging isn't available",
+                    summary::format_watts(now)
+                ),
+                (None, None, _) => "Power available".to_string(),
             };
             group.add(&row("ac-adapter-symbolic", "Powering this computer", &detail));
         }
@@ -304,6 +318,12 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
                 parts.push("active cable".to_string());
             }
             parts.join(" · ")
+        }
+        CableSummary::TypeOnly { active: true } => {
+            "Active cable · speed and power rating not reported".to_string()
+        }
+        CableSummary::TypeOnly { active: false } => {
+            "Passive cable · speed and power rating not reported".to_string()
         }
         // Often the computer simply can't ask (e.g. while it's being charged),
         // so don't blame the cable here.

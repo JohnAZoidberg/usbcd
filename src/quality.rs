@@ -419,7 +419,7 @@ mod tests {
             },
             pd_revision: pd_rev,
             alt_modes,
-            power: None,
+            ..Default::default()
         }
     }
 
@@ -442,6 +442,7 @@ mod tests {
             pd_revision: pd_rev,
             cable_type,
             plug_alt_modes: alt_modes,
+            ..Default::default()
         }
     }
 
@@ -594,7 +595,7 @@ mod tests {
             power_operation_mode: crate::types::PowerOpMode::Default,
             partner: Some(partner),
             cable: Some(cable),
-            power: None,
+            ..Default::default()
         };
         let warnings = check_cable_quality(&port);
         assert!(warnings.contains(&CableWarning::InvalidUsb4Cable));
@@ -628,7 +629,7 @@ mod tests {
             power_operation_mode: crate::types::PowerOpMode::Default,
             partner: Some(partner),
             cable: Some(cable),
-            power: None,
+            ..Default::default()
         };
         let warnings = check_cable_quality(&port);
         assert!(warnings.contains(&CableWarning::InvalidUsb4ValidTbtCable));
@@ -652,7 +653,7 @@ mod tests {
             power_operation_mode: crate::types::PowerOpMode::Default,
             partner: Some(partner),
             cable: Some(cable),
-            power: None,
+            ..Default::default()
         };
         let warnings = check_cable_quality(&port);
         assert!(warnings.contains(&CableWarning::InvalidTbtCable));
@@ -667,7 +668,7 @@ mod tests {
             power_operation_mode: crate::types::PowerOpMode::Default,
             partner: None,
             cable: None,
-            power: None,
+            ..Default::default()
         };
         let warnings = check_cable_quality(&port);
         assert!(warnings.is_empty());
@@ -692,7 +693,7 @@ mod tests {
             power_operation_mode: crate::types::PowerOpMode::Default,
             partner: Some(partner),
             cable: Some(cable),
-            power: None,
+            ..Default::default()
         };
         // Partner supports USB4 and cable supports USB4 (passive, speed != USB2.0)
         // So USB4 mode entry succeeds. Then we check speed limiting.
