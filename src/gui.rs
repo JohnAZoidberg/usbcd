@@ -3,6 +3,7 @@
 // Rebuilds the port list from sysfs whenever udev reports a USB-C change, so plugging
 // and unplugging updates the window live.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -20,6 +21,9 @@ const APP_ID: &str = "io.github.usbc.Usbc";
 /// plug event produces a burst of partner/cable/altmode uevents.
 const DEBOUNCE: Duration = Duration::from_millis(750);
 
+/// Below this window width the ports stack in one column instead of two.
+const NARROW_WIDTH_SP: f64 = 720.0;
+
 pub fn run() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_window);
@@ -31,6 +35,8 @@ struct Ui {
     window: adw::ApplicationWindow,
     stack: gtk::Stack,
     ports_box: gtk::Box,
+    ports_grid: gtk::Grid,
+    columns: Cell<i32>,
     report: gtk::Label,
     toasts: adw::ToastOverlay,
 }
@@ -49,6 +55,11 @@ fn build_window(app: &adw::Application) {
     header.pack_start(&refresh_button);
 
     let ports_box = gtk::Box::new(gtk::Orientation::Vertical, 24);
+    let ports_grid = gtk::Grid::builder()
+        .row_spacing(24)
+        .column_spacing(24)
+        .column_homogeneous(true)
+        .build();
 
     let report = gtk::Label::builder()
         .xalign(0.0)
@@ -92,7 +103,7 @@ fn build_window(app: &adw::Application) {
 
     let scrolled = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&adw::Clamp::builder().maximum_size(640).child(&page).build())
+        .child(&adw::Clamp::builder().maximum_size(1200).child(&page).build())
         .build();
 
     let empty = adw::StatusPage::builder()
@@ -120,17 +131,38 @@ fn build_window(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("USB-C Status")
-        .default_width(560)
+        .default_width(960)
         .default_height(720)
+        // Breakpoints need a fixed minimum size; this is the GNOME HIG minimum.
+        .width_request(360)
+        .height_request(294)
         .content(&toolbar)
         .build();
+
+    let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth,
+        NARROW_WIDTH_SP,
+        adw::LengthUnit::Sp,
+    ));
+    window.add_breakpoint(narrow.clone());
 
     let ui = Rc::new(Ui {
         window,
         stack,
         ports_box,
+        ports_grid,
+        columns: Cell::new(2),
         report,
         toasts,
+    });
+
+    narrow.connect_apply({
+        let ui = ui.clone();
+        move |_| set_columns(&ui, 1)
+    });
+    narrow.connect_unapply({
+        let ui = ui.clone();
+        move |_| set_columns(&ui, 2)
     });
 
     refresh_button.connect_clicked({
@@ -183,8 +215,36 @@ fn refresh(ui: &Ui) {
 
     let summaries: Vec<PortSummary> = ports.iter().map(summary::summarize).collect();
     ui.ports_box.append(&headline(summary::overall(&summaries)));
-    for s in &summaries {
-        ui.ports_box.append(&port_group(s));
+
+    while let Some(child) = ui.ports_grid.first_child() {
+        ui.ports_grid.remove(&child);
+    }
+    let groups: Vec<gtk::Widget> = summaries
+        .iter()
+        .map(|s| {
+            let group = port_group(s);
+            // Rows take the height of the taller port; keep the shorter one at the top.
+            group.set_valign(gtk::Align::Start);
+            group.upcast()
+        })
+        .collect();
+    place_ports(&ui.ports_grid, &groups, ui.columns.get());
+    ui.ports_box.append(&ui.ports_grid);
+}
+
+fn set_columns(ui: &Ui, columns: i32) {
+    ui.columns.set(columns);
+    let mut groups = Vec::new();
+    while let Some(child) = ui.ports_grid.first_child() {
+        ui.ports_grid.remove(&child);
+        groups.push(child);
+    }
+    place_ports(&ui.ports_grid, &groups, columns);
+}
+
+fn place_ports(grid: &gtk::Grid, groups: &[gtk::Widget], columns: i32) {
+    for (i, group) in (0..).zip(groups) {
+        grid.attach(group, i % columns, i / columns, 1, 1);
     }
 }
 
