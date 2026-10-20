@@ -84,6 +84,15 @@ pub enum PowerFlow {
         /// the port (selected PDO voltage times requested current).
         negotiated_milliwatts: Option<u32>,
     },
+    /// A charger has a contract with the laptop but its power path is off,
+    /// usually because the laptop is charging from another port. The
+    /// contract is real (VBUS is at the negotiated voltage), the sink FET
+    /// is just open. The kernel reports this as "Not charging", from the
+    /// UCSI 2.0 sink path status bit.
+    Standby {
+        max_milliwatts: Option<u32>,
+        negotiated_milliwatts: Option<u32>,
+    },
     /// The laptop is powering this device.
     ///
     /// `max_milliwatts` is the most the port offers, from its own source
@@ -202,6 +211,15 @@ fn power_flow(port: &Port, partner: Option<&Partner>) -> PowerFlow {
             let negotiated_milliwatts = contract
                 .filter(|c| c.has_values())
                 .map(|c| c.milliwatts());
+            // Only an explicit "Not charging" means the path is off: older
+            // UCSI and other port drivers don't report it, so treat anything
+            // else as charging.
+            if contract.is_some_and(|c| c.status == "Not charging") {
+                return PowerFlow::Standby {
+                    max_milliwatts,
+                    negotiated_milliwatts,
+                };
+            }
             PowerFlow::Receiving {
                 max_milliwatts,
                 pd,
@@ -542,6 +560,27 @@ mod tests {
             }
         );
         assert_eq!(overall(&[s]), Overall::AllGood);
+    }
+
+    #[test]
+    fn test_charger_with_sink_path_off_is_standby() {
+        // Second charger while another port charges: the contract is live
+        // but the EC told the PD controller to keep the sink FET open.
+        let mut port = sinking_port(PowerOpMode::UsbPowerDelivery, true, 20000, 3000);
+        port.contract.as_mut().unwrap().status = "Not charging".into();
+        port.partner = Some(Partner {
+            supports_pd: Some(true),
+            ..Default::default()
+        });
+        let device = summarize(&port).device.unwrap();
+        assert_eq!(device.kind, DeviceKind::Charger);
+        assert_eq!(
+            device.power,
+            PowerFlow::Standby {
+                max_milliwatts: None,
+                negotiated_milliwatts: Some(60_000),
+            }
+        );
     }
 
     #[test]

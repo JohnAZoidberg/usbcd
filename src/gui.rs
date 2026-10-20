@@ -357,6 +357,19 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
             };
             group.add(&row("ac-adapter-symbolic", "Powering this computer", &detail));
         }
+        PowerFlow::Standby {
+            max_milliwatts,
+            negotiated_milliwatts,
+        } => {
+            let detail = match negotiated_milliwatts.or(max_milliwatts) {
+                Some(mw) => format!(
+                    "{} ready, but this computer is drawing power from somewhere else",
+                    summary::format_watts(mw)
+                ),
+                None => "Ready, but this computer is drawing power from somewhere else".to_string(),
+            };
+            group.add(&row("ac-adapter-symbolic", "Standing by", &detail));
+        }
         PowerFlow::Supplying {
             max_milliwatts,
             negotiated_milliwatts,
