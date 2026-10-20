@@ -65,9 +65,16 @@ impl DeviceKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerFlow {
-    /// The laptop is drawing power from this device. `max_watts` is the most
-    /// the device offers, if it told us.
-    Receiving { max_watts: Option<u32> },
+    /// The laptop is drawing power from this device.
+    ///
+    /// `max_milliwatts` is the most the device offers, if known. With a PD
+    /// contract (`pd`) it comes from the partner's source capabilities. Without
+    /// PD the partner only advertises a Type-C current at 5 V, which caps
+    /// charging at 7.5 W or 15 W and is why a laptop charges slowly from it.
+    Receiving {
+        max_milliwatts: Option<u32>,
+        pd: bool,
+    },
     /// The laptop is powering this device.
     Supplying,
     Unknown,
@@ -154,13 +161,31 @@ fn summarize_device(port: &Port) -> Option<DeviceSummary> {
 
 fn power_flow(port: &Port, partner: Option<&Partner>) -> PowerFlow {
     match port.power_role {
-        PowerRole::Sink => PowerFlow::Receiving {
-            max_watts: partner
+        PowerRole::Sink => {
+            let pd_milliwatts = partner
                 .and_then(|p| p.power.as_ref())
-                .and_then(|p| max_fixed_watts(&p.source)),
-        },
+                .and_then(|p| max_fixed_milliwatts(&p.source));
+            let pd = pd_milliwatts.is_some()
+                || port.power_operation_mode == PowerOpMode::UsbPowerDelivery;
+            let max_milliwatts = pd_milliwatts.or_else(|| match port.power_operation_mode {
+                PowerOpMode::Current15A => Some(5000 * 1500 / 1000),
+                PowerOpMode::Current30A => Some(5000 * 3000 / 1000),
+                _ => None,
+            });
+            PowerFlow::Receiving { max_milliwatts, pd }
+        }
         PowerRole::Source => PowerFlow::Supplying,
         PowerRole::None => PowerFlow::Unknown,
+    }
+}
+
+/// "65 W", or "7.5 W" when it isn't a whole number.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub fn format_watts(milliwatts: u32) -> String {
+    if milliwatts % 1000 == 0 {
+        format!("{} W", milliwatts / 1000)
+    } else {
+        format!("{:.1} W", milliwatts as f64 / 1000.0)
     }
 }
 
@@ -233,11 +258,11 @@ fn supports_usb4(partner: &Partner) -> bool {
     (cap & DEVICE_CAPABILITY_USB4) != 0
 }
 
-fn max_fixed_watts(pdos: &[Pdo]) -> Option<u32> {
+fn max_fixed_milliwatts(pdos: &[Pdo]) -> Option<u32> {
     pdos.iter()
         .filter_map(|pdo| match pdo {
             Pdo::FixedSupply { voltage_mv, current_ma } => {
-                Some(((*voltage_mv as u64) * (*current_ma as u64) / 1_000_000) as u32)
+                Some(((*voltage_mv as u64) * (*current_ma as u64) / 1_000) as u32)
             }
             _ => None,
         })
@@ -405,7 +430,13 @@ mod tests {
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Charger);
         assert!(device.features.is_empty());
-        assert_eq!(device.power, PowerFlow::Receiving { max_watts: None });
+        assert_eq!(
+            device.power,
+            PowerFlow::Receiving {
+                max_milliwatts: None,
+                pd: true
+            }
+        );
         assert_eq!(overall(&[s]), Overall::AllGood);
     }
 
@@ -415,6 +446,36 @@ mod tests {
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Unknown);
         assert_eq!(device.power, PowerFlow::Supplying);
+    }
+
+    #[test]
+    fn test_legacy_current_is_reported_as_watts() {
+        let s = summarize(&port_with_mode(PowerRole::Sink, PowerOpMode::Current15A));
+        assert_eq!(
+            s.device.unwrap().power,
+            PowerFlow::Receiving {
+                max_milliwatts: Some(7_500),
+                pd: false
+            }
+        );
+
+        // Also when the partner did identify itself but offered no PDOs.
+        let mut port = port(PowerRole::Sink, Some(partner(0x18000000, 0, vec![])), None);
+        port.power_operation_mode = PowerOpMode::Current30A;
+        assert_eq!(
+            summarize(&port).device.unwrap().power,
+            PowerFlow::Receiving {
+                max_milliwatts: Some(15_000),
+                pd: false
+            }
+        );
+    }
+
+    #[test]
+    fn test_format_watts() {
+        assert_eq!(format_watts(65_000), "65 W");
+        assert_eq!(format_watts(7_500), "7.5 W");
+        assert_eq!(format_watts(15_000), "15 W");
     }
 
     #[test]
@@ -440,7 +501,13 @@ mod tests {
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Dock);
         assert_eq!(device.features, vec!["USB4", "Thunderbolt", "Video"]);
-        assert_eq!(device.power, PowerFlow::Receiving { max_watts: None });
+        assert_eq!(
+            device.power,
+            PowerFlow::Receiving {
+                max_milliwatts: None,
+                pd: false
+            }
+        );
         assert_eq!(
             s.cable,
             CableSummary::Identified {
@@ -472,7 +539,13 @@ mod tests {
         let s = summarize(&port(PowerRole::Sink, Some(charger), None));
         let device = s.device.unwrap();
         assert_eq!(device.kind, DeviceKind::Charger);
-        assert_eq!(device.power, PowerFlow::Receiving { max_watts: Some(65) });
+        assert_eq!(
+            device.power,
+            PowerFlow::Receiving {
+                max_milliwatts: Some(65_000),
+                pd: true
+            }
+        );
         assert_eq!(s.cable, CableSummary::Unidentified);
     }
 

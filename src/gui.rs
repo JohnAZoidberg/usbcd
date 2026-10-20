@@ -261,10 +261,15 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
     ));
 
     match device.power {
-        PowerFlow::Receiving { max_watts } => {
-            let detail = match max_watts {
-                Some(w) => format!("Up to {w} W available"),
-                None => "Power available".to_string(),
+        PowerFlow::Receiving { max_milliwatts, pd } => {
+            let detail = match (max_milliwatts, pd) {
+                (Some(mw), true) => format!("Up to {} available", summary::format_watts(mw)),
+                // No PD contract: plain 5 V charging, which is why it's slow.
+                (Some(mw), false) => format!(
+                    "Basic USB charging, up to {}. Fast charging isn't available",
+                    summary::format_watts(mw)
+                ),
+                (None, _) => "Power available".to_string(),
             };
             group.add(&row("ac-adapter-symbolic", "Powering this computer", &detail));
         }
