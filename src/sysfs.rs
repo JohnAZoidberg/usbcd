@@ -262,19 +262,20 @@ fn read_pd_identity(dir: &Path) -> PdIdentity {
     }
 }
 
+/// The PD revision from `usb_power_delivery_revision`, or from the linked
+/// `usb_power_delivery/revision` when the former reads "0.0": UCSI fills the
+/// PD object from the partner's capabilities but not the attribute.
 fn read_pd_revision(dir: &Path) -> PdRevision {
-    let path = dir.join("usb_power_delivery_revision");
-    let s = match fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return PdRevision::None,
-    };
-    let s = s.trim();
-    match s {
-        "2.0" => PdRevision::V2_0,
-        "3.0" => PdRevision::V3_0,
-        "3.1" => PdRevision::V3_1,
-        "3.2" => PdRevision::V3_2,
+    let parse = |path: PathBuf| match read_trimmed(&path).as_deref() {
+        Some("2.0") => PdRevision::V2_0,
+        Some("3.0") => PdRevision::V3_0,
+        Some("3.1") => PdRevision::V3_1,
+        Some("3.2") => PdRevision::V3_2,
         _ => PdRevision::None,
+    };
+    match parse(dir.join("usb_power_delivery_revision")) {
+        PdRevision::None => parse(dir.join("usb_power_delivery/revision")),
+        rev => rev,
     }
 }
 
@@ -784,6 +785,8 @@ mod tests {
         write_fake_attr(base, "port2/port2-partner/supports_usb_power_delivery", "yes\n");
         write_fake_attr(base, "port2/port2-partner/number_of_alternate_modes", "0\n");
         write_fake_attr(base, "port2/port2-partner/accessory_mode", "none\n");
+        write_fake_attr(base, "port2/port2-partner/usb_power_delivery_revision", "0.0\n");
+        write_fake_attr(base, "port2/port2-partner/usb_power_delivery/revision", "3.2\n");
         write_fake_attr(base, "port2/port2-cable/type", "passive\n");
         write_fake_attr(base, "port2/port2-cable/plug_type", "type-c\n");
 
@@ -793,6 +796,7 @@ mod tests {
         assert_eq!(partner.supports_pd, Some(true));
         assert_eq!(partner.num_alt_modes, Some(0));
         assert_eq!(partner.accessory_mode.as_deref(), Some("none"));
+        assert_eq!(partner.pd_revision, PdRevision::V3_2);
 
         let cable = p.cable.as_ref().unwrap();
         assert!(!cable.identity.is_present());

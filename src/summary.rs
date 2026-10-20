@@ -15,17 +15,20 @@ pub struct PortSummary {
     pub device: Option<DeviceSummary>,
     /// Only meaningful when a device is connected.
     pub cable: CableSummary,
+    /// Alt modes the cable plug answered for, e.g. "Thunderbolt". A cable
+    /// can report these even when its e-marker identity is missing.
+    pub cable_features: Vec<&'static str>,
     pub issues: Vec<Issue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceSummary {
     pub kind: DeviceKind,
-    /// Short capability tags, e.g. "USB4", "Thunderbolt", "Video".
+    /// Short capability tags, e.g. "USB4", "Thunderbolt", "Video", "USB PD 3.0".
     pub features: Vec<&'static str>,
     pub power: PowerFlow,
     /// False when the device never answered Discover Identity, so `kind` is a
-    /// guess from the power role and `features` is necessarily empty.
+    /// guess from the power role and `features` can only name the PD version.
     pub identified: bool,
 }
 
@@ -144,6 +147,11 @@ pub fn summarize(port: &Port) -> PortSummary {
         number: port.number,
         device: summarize_device(port),
         cable: summarize_cable(port.cable.as_ref()),
+        cable_features: port
+            .cable
+            .as_ref()
+            .map(cable_features)
+            .unwrap_or_default(),
         issues: quality::check_cable_quality(port)
             .into_iter()
             .map(issue_for)
@@ -170,7 +178,7 @@ fn summarize_device(port: &Port) -> Option<DeviceSummary> {
     };
     Some(DeviceSummary {
         kind,
-        features: vec![],
+        features: pd_feature(port, None).into_iter().collect(),
         power: power_flow(port, None),
         identified: false,
     })
@@ -239,12 +247,26 @@ fn summarize_partner(port: &Port, partner: &Partner) -> DeviceSummary {
     if supports_dp(partner) {
         features.push("Video");
     }
+    features.extend(pd_feature(port, Some(partner)));
 
     DeviceSummary {
         kind: device_kind(port, partner),
         features,
         power,
         identified: partner.identity.id_header_vdo != 0,
+    }
+}
+
+/// "USB PD 3.0", or "USB PD" when the partner talks PD but its revision is
+/// unknown.
+fn pd_feature(port: &Port, partner: Option<&Partner>) -> Option<&'static str> {
+    match partner.map(|p| p.pd_revision) {
+        Some(PdRevision::V2_0) => Some("USB PD 2.0"),
+        Some(PdRevision::V3_0) => Some("USB PD 3.0"),
+        Some(PdRevision::V3_1) => Some("USB PD 3.1"),
+        Some(PdRevision::V3_2) => Some("USB PD 3.2"),
+        _ if port.partner_supports_pd() == Some(true) => Some("USB PD"),
+        _ => None,
     }
 }
 
@@ -329,6 +351,25 @@ fn summarize_cable(cable: Option<&Cable>) -> CableSummary {
         speed: speed_label(vdo1 & USB_SPEED_MASK),
         max_watts,
     }
+}
+
+fn cable_features(cable: &Cable) -> Vec<&'static str> {
+    let mut features = Vec::new();
+    if let Some(tbt) = cable.plug_alt_modes.iter().find(|m| m.svid == TBT_ALT_MODE_VID) {
+        let tbt_mode = field(tbt.vdo, TBT3_CABLE_MODE_OFFSET, TBT3_CABLE_MODE_MASK);
+        let speed = field(tbt.vdo, TBT3_CABLE_SPEED_OFFSET, TBT3_CABLE_SPEED_MASK);
+        features.push(
+            if tbt_mode == TBT3_CABLE_MODE_TBT && speed == TBT3_CABLE_SPEED_10G_20G {
+                "Thunderbolt 40 Gbps"
+            } else {
+                "Thunderbolt"
+            },
+        );
+    }
+    if cable.plug_alt_modes.iter().any(|m| m.svid == DP_ALT_MODE_SID) {
+        features.push("DisplayPort");
+    }
+    features
 }
 
 /// Power rating from the cable VDO1 VBUS current (bits 6:5) and max VBUS
@@ -491,7 +532,7 @@ mod tests {
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Charger);
         assert!(!device.identified);
-        assert!(device.features.is_empty());
+        assert_eq!(device.features, vec!["USB PD"]);
         assert_eq!(
             device.power,
             PowerFlow::Receiving {
@@ -611,6 +652,29 @@ mod tests {
     }
 
     #[test]
+    fn test_cable_alt_modes_without_identity() {
+        // Passive Thunderbolt 3 cable whose e-marker identity the kernel
+        // didn't get, but whose SOP' alt modes it did.
+        let cable = Cable {
+            cable_type: CableType::Passive,
+            plug_alt_modes: vec![
+                AltMode { svid: TBT_ALT_MODE_VID, vdo: 0x00030001 },
+                AltMode { svid: 0x05ac, vdo: 0x5 },
+            ],
+            ..Default::default()
+        };
+        let s = summarize(&port(PowerRole::Sink, Some(Partner::default()), Some(cable)));
+        assert_eq!(s.cable, CableSummary::TypeOnly { active: false });
+        assert_eq!(s.cable_features, vec!["Thunderbolt 40 Gbps"]);
+
+        let dp_cable = Cable {
+            plug_alt_modes: vec![AltMode { svid: DP_ALT_MODE_SID, vdo: 0 }],
+            ..Default::default()
+        };
+        assert_eq!(cable_features(&dp_cable), vec!["DisplayPort"]);
+    }
+
+    #[test]
     fn test_cable_known_only_to_the_kernel() {
         let cable = Cable {
             cable_type: CableType::Passive,
@@ -654,7 +718,7 @@ mod tests {
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Dock);
         assert!(device.identified);
-        assert_eq!(device.features, vec!["USB4", "Thunderbolt", "Video"]);
+        assert_eq!(device.features, vec!["USB4", "Thunderbolt", "Video", "USB PD 3.0"]);
         assert_eq!(
             device.power,
             PowerFlow::Receiving {

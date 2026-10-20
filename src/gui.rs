@@ -254,12 +254,15 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
         return group;
     };
 
-    // An empty feature list on an unidentified device would look like a bug,
-    // so say why there's nothing to show.
-    let device_detail = if device.identified {
-        device.features.join(" · ")
-    } else {
-        "Device didn't report its details".to_string()
+    // A short feature list on an unidentified device would look like a bug,
+    // so say why there's nothing more to show.
+    let device_detail = match (device.identified, device.features.is_empty()) {
+        (true, _) => device.features.join(" · "),
+        (false, true) => "Device didn't report its details".to_string(),
+        (false, false) => format!(
+            "{} · no other details reported",
+            device.features.join(" · ")
+        ),
     };
     group.add(&row(
         device.kind.icon_name(),
@@ -316,7 +319,15 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
         PowerFlow::Unknown => {}
     }
 
-    let cable_detail = match &s.cable {
+    let features = s.cable_features.iter().map(|f| f.to_string());
+    // Alt modes can come without the e-marker ratings, so the rating is only
+    // "not reported" in full when there's nothing else to say.
+    let not_reported = if s.cable_features.is_empty() {
+        "speed and power rating not reported"
+    } else {
+        "full rating not reported"
+    };
+    let parts: Vec<String> = match &s.cable {
         CableSummary::Identified {
             active,
             speed,
@@ -329,18 +340,29 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
             if *active {
                 parts.push("active cable".to_string());
             }
-            parts.join(" · ")
+            parts.extend(features);
+            parts
         }
-        CableSummary::TypeOnly { active: true } => {
-            "Active cable · speed and power rating not reported".to_string()
-        }
-        CableSummary::TypeOnly { active: false } => {
-            "Passive cable · speed and power rating not reported".to_string()
+        CableSummary::TypeOnly { active } => {
+            let kind = if *active { "Active cable" } else { "Passive cable" };
+            let mut parts = vec![kind.to_string()];
+            parts.extend(features);
+            parts.push(not_reported.to_string());
+            parts
         }
         // Often the computer simply can't ask (e.g. while it's being charged),
         // so don't blame the cable here.
-        CableSummary::Unidentified => "Speed and power rating not reported".to_string(),
+        CableSummary::Unidentified => {
+            let mut parts: Vec<String> = features.collect();
+            parts.push(not_reported.to_string());
+            parts
+        }
     };
+    let mut cable_detail = parts.join(" · ");
+    // The list may start with a lowercase rating note.
+    if let Some(first) = cable_detail.get(..1) {
+        cable_detail.replace_range(..1, &first.to_uppercase());
+    }
     group.add(&row("network-wired-symbolic", "Cable", &cable_detail));
 
     for issue in &s.issues {
