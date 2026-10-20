@@ -208,6 +208,7 @@ fn read_partner(base: &Path, port_num: u32) -> Option<Partner> {
         supports_pd: read_yes_no(&partner_dir.join("supports_usb_power_delivery")),
         num_alt_modes: read_decimal_file(&partner_dir.join("number_of_alternate_modes")),
         accessory_mode: read_trimmed(&partner_dir.join("accessory_mode")),
+        identity_exposed: partner_dir.join("identity").is_dir(),
     })
 }
 
@@ -687,6 +688,7 @@ mod tests {
 
         let partner = p.partner.as_ref().unwrap();
         assert_eq!(partner.identity.id_header_vdo, 0x6c0004b4);
+        assert!(partner.identity_exposed);
         assert_eq!(partner.alt_modes.len(), 1);
         assert_eq!(partner.alt_modes[0].svid, 0xff01);
         assert_eq!(partner.supports_pd, None);
@@ -793,6 +795,7 @@ mod tests {
         let p = scan_port_at(base, 2).unwrap();
         let partner = p.partner.as_ref().unwrap();
         assert!(!partner.identity.is_present());
+        assert!(!partner.identity_exposed);
         assert_eq!(partner.supports_pd, Some(true));
         assert_eq!(partner.num_alt_modes, Some(0));
         assert_eq!(partner.accessory_mode.as_deref(), Some("none"));

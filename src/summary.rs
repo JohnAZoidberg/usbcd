@@ -27,9 +27,14 @@ pub struct DeviceSummary {
     /// Short capability tags, e.g. "USB4", "Thunderbolt", "Video", "USB PD 3.0".
     pub features: Vec<&'static str>,
     pub power: PowerFlow,
-    /// False when the device never answered Discover Identity, so `kind` is a
-    /// guess from the power role and `features` can only name the PD version.
+    /// False when there is no Discover Identity answer, so `kind` is a guess
+    /// from the power role and `features` can only name the PD version.
     pub identified: bool,
+    /// Why there is no answer: this computer's port driver never asked. The
+    /// kernel only exposes partner identity when the controller firmware
+    /// relays PD messages, which much UCSI firmware doesn't. Nothing would
+    /// ever be identified on such a port, so it isn't the device's fault.
+    pub identity_unavailable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +74,7 @@ impl DeviceKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PowerFlow {
     /// The laptop is drawing power from this device.
     ///
@@ -83,6 +88,10 @@ pub enum PowerFlow {
         /// What was actually negotiated, from the kernel's power supply for
         /// the port (selected PDO voltage times requested current).
         negotiated_milliwatts: Option<u32>,
+        /// Every way the device offers to supply power (its source PDOs), in
+        /// the order it listed them. Empty when it sent none, or when the
+        /// kernel registered the contract before the partner device.
+        offers: Vec<PowerOffer>,
     },
     /// A charger has a contract with the laptop but its power path is off,
     /// usually because the laptop is charging from another port. The
@@ -103,6 +112,18 @@ pub enum PowerFlow {
         negotiated_milliwatts: Option<u32>,
     },
     Unknown,
+}
+
+/// One entry of a charger's source capabilities, in plain language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerOffer {
+    /// Headline: "60 W", or "Adjustable voltage (PPS)" when the power
+    /// depends on the voltage chosen.
+    pub title: String,
+    /// The electrical terms: "20 V · 3 A", "3.3–21 V · up to 3 A".
+    pub detail: String,
+    /// The contract in force selected this offer.
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,15 +211,18 @@ fn summarize_device(port: &Port) -> Option<DeviceSummary> {
         features: pd_feature(port, None).into_iter().collect(),
         power: power_flow(port, None),
         identified: false,
+        identity_unavailable: false,
     })
 }
 
 fn power_flow(port: &Port, partner: Option<&Partner>) -> PowerFlow {
     match port.effective_power_role() {
         PowerRole::Sink => {
-            let pd_milliwatts = partner
+            let source_pdos: &[Pdo] = partner
                 .and_then(|p| p.power.as_ref())
-                .and_then(|p| max_fixed_milliwatts(&p.source));
+                .map(|p| p.source.as_slice())
+                .unwrap_or(&[]);
+            let pd_milliwatts = max_fixed_milliwatts(source_pdos);
             let contract = port.contract.as_ref().filter(|c| c.online);
             let pd = pd_milliwatts.is_some()
                 || contract.is_some_and(|c| c.pd)
@@ -208,9 +232,8 @@ fn power_flow(port: &Port, partner: Option<&Partner>) -> PowerFlow {
                 PowerOpMode::Current30A => Some(5000 * 3000 / 1000),
                 _ => None,
             });
-            let negotiated_milliwatts = contract
-                .filter(|c| c.has_values())
-                .map(|c| c.milliwatts());
+            let negotiated = contract.filter(|c| c.has_values());
+            let negotiated_milliwatts = negotiated.map(|c| c.milliwatts());
             // Only an explicit "Not charging" means the path is off: older
             // UCSI and other port drivers don't report it, so treat anything
             // else as charging.
@@ -224,6 +247,7 @@ fn power_flow(port: &Port, partner: Option<&Partner>) -> PowerFlow {
                 max_milliwatts,
                 pd,
                 negotiated_milliwatts,
+                offers: power_offers(source_pdos, negotiated),
             }
         }
         PowerRole::Source => PowerFlow::Supplying {
@@ -243,12 +267,132 @@ fn power_flow(port: &Port, partner: Option<&Partner>) -> PowerFlow {
 }
 
 /// "65 W", or "7.5 W" when it isn't a whole number.
-#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 pub fn format_watts(milliwatts: u32) -> String {
     if milliwatts % 1000 == 0 {
         format!("{} W", milliwatts / 1000)
     } else {
         format!("{:.1} W", milliwatts as f64 / 1000.0)
+    }
+}
+
+/// "20", "3.3" or "3.25": as few decimals as the value needs.
+fn format_milli(value: u32) -> String {
+    if value % 1000 == 0 {
+        format!("{}", value / 1000)
+    } else if value % 100 == 0 {
+        format!("{:.1}", value as f64 / 1000.0)
+    } else {
+        format!("{:.2}", value as f64 / 1000.0)
+    }
+}
+
+fn format_volt_range(min_mv: u32, max_mv: u32) -> String {
+    format!("{}–{} V", format_milli(min_mv), format_milli(max_mv))
+}
+
+fn milliwatts(voltage_mv: u32, current_ma: u32) -> u32 {
+    ((voltage_mv as u64) * (current_ma as u64) / 1_000) as u32
+}
+
+/// The partner's source PDOs as offers, with the one the contract selected
+/// marked. The kernel doesn't expose the RDO's object position, so the match
+/// is by the contract's voltage: for a PPS contract the adjustable range
+/// containing it, otherwise the fixed offer at exactly that voltage.
+fn power_offers(pdos: &[Pdo], contract: Option<&Contract>) -> Vec<PowerOffer> {
+    let active = contract.and_then(|c| active_offer(pdos, c));
+    pdos.iter()
+        .enumerate()
+        .map(|(i, pdo)| {
+            let (title, detail) = describe_pdo(pdo);
+            PowerOffer {
+                title,
+                detail,
+                active: active == Some(i),
+            }
+        })
+        .collect()
+}
+
+fn active_offer(pdos: &[Pdo], c: &Contract) -> Option<usize> {
+    let covers = |min: u32, max: u32| (min..=max).contains(&c.voltage_mv);
+    if c.pps {
+        return pdos
+            .iter()
+            .position(|p| match p {
+                Pdo::ProgrammableSupply {
+                    min_voltage_mv,
+                    max_voltage_mv,
+                    ..
+                } => covers(*min_voltage_mv, *max_voltage_mv),
+                _ => false,
+            })
+            .or_else(|| {
+                pdos.iter()
+                    .position(|p| matches!(p, Pdo::ProgrammableSupply { .. }))
+            });
+    }
+    pdos.iter()
+        .position(|p| matches!(p, Pdo::FixedSupply { voltage_mv, .. } if *voltage_mv == c.voltage_mv))
+        // AVS runs 9 to 20 V in 100 mV steps; only considered when no fixed
+        // offer sits at this voltage.
+        .or_else(|| {
+            pdos.iter()
+                .position(|p| matches!(p, Pdo::SprAvs { .. }) && covers(9000, 20000))
+        })
+}
+
+fn describe_pdo(pdo: &Pdo) -> (String, String) {
+    match *pdo {
+        Pdo::FixedSupply {
+            voltage_mv,
+            current_ma,
+        } => (
+            format_watts(milliwatts(voltage_mv, current_ma)),
+            format!("{} V · {} A", format_milli(voltage_mv), format_milli(current_ma)),
+        ),
+        Pdo::ProgrammableSupply {
+            min_voltage_mv,
+            max_voltage_mv,
+            max_current_ma,
+        } => (
+            "Adjustable voltage (PPS)".to_string(),
+            format!(
+                "{} · up to {} A",
+                format_volt_range(min_voltage_mv, max_voltage_mv),
+                format_milli(max_current_ma)
+            ),
+        ),
+        Pdo::SprAvs {
+            max_current_9v_to_15v_ma,
+            max_current_15v_to_20v_ma,
+        } => (
+            "Adjustable voltage (AVS)".to_string(),
+            format!(
+                "9–20 V · up to {} A below 15 V, {} A above",
+                format_milli(max_current_9v_to_15v_ma),
+                format_milli(max_current_15v_to_20v_ma)
+            ),
+        ),
+        Pdo::VariableSupply {
+            min_voltage_mv,
+            max_voltage_mv,
+            current_ma,
+        } => (
+            "Variable voltage".to_string(),
+            format!(
+                "{} · {} A",
+                format_volt_range(min_voltage_mv, max_voltage_mv),
+                format_milli(current_ma)
+            ),
+        ),
+        Pdo::Battery {
+            min_voltage_mv,
+            max_voltage_mv,
+            power_mw,
+        } => (
+            format!("{} (battery)", format_watts(power_mw)),
+            format_volt_range(min_voltage_mv, max_voltage_mv),
+        ),
     }
 }
 
@@ -271,7 +415,8 @@ fn summarize_partner(port: &Port, partner: &Partner) -> DeviceSummary {
         kind: device_kind(port, partner),
         features,
         power,
-        identified: partner.identity.id_header_vdo != 0,
+        identified: partner.identity.is_present(),
+        identity_unavailable: !partner.identity_exposed,
     }
 }
 
@@ -339,9 +484,7 @@ fn supports_usb4(partner: &Partner) -> bool {
 fn max_fixed_milliwatts(pdos: &[Pdo]) -> Option<u32> {
     pdos.iter()
         .filter_map(|pdo| match pdo {
-            Pdo::FixedSupply { voltage_mv, current_ma } => {
-                Some(((*voltage_mv as u64) * (*current_ma as u64) / 1_000) as u32)
-            }
+            Pdo::FixedSupply { voltage_mv, current_ma } => Some(milliwatts(*voltage_mv, *current_ma)),
             _ => None,
         })
         .max()
@@ -557,6 +700,7 @@ mod tests {
                 max_milliwatts: None,
                 pd: true,
                 negotiated_milliwatts: Some(60_000),
+                offers: vec![],
             }
         );
         assert_eq!(overall(&[s]), Overall::AllGood);
@@ -661,6 +805,7 @@ mod tests {
                 max_milliwatts: None,
                 pd: true,
                 negotiated_milliwatts: Some(94_000),
+                offers: vec![],
             }
         );
     }
@@ -674,6 +819,7 @@ mod tests {
                 max_milliwatts: Some(7_500),
                 pd: false,
                 negotiated_milliwatts: Some(7_500),
+                offers: vec![],
             }
         );
 
@@ -686,6 +832,7 @@ mod tests {
                 max_milliwatts: Some(15_000),
                 pd: false,
                 negotiated_milliwatts: None,
+                offers: vec![],
             }
         );
     }
@@ -764,6 +911,7 @@ mod tests {
                 max_milliwatts: None,
                 pd: false,
                 negotiated_milliwatts: None,
+                offers: vec![],
             }
         );
         assert_eq!(
@@ -803,9 +951,136 @@ mod tests {
                 max_milliwatts: Some(65_000),
                 pd: true,
                 negotiated_milliwatts: None,
+                // No contract known, so nothing is marked in use.
+                offers: vec![
+                    offer("15 W", "5 V · 3 A", false),
+                    offer("65 W", "20 V · 3.25 A", false),
+                    offer("Adjustable voltage (PPS)", "3.3–21 V · up to 5 A", false),
+                ],
             }
         );
         assert_eq!(s.cable, CableSummary::Unidentified);
+    }
+
+    fn offer(title: &str, detail: &str, active: bool) -> PowerOffer {
+        PowerOffer {
+            title: title.into(),
+            detail: detail.into(),
+            active,
+        }
+    }
+
+    fn offers_of(port: &Port) -> Vec<PowerOffer> {
+        match summarize(port).device.unwrap().power {
+            PowerFlow::Receiving { offers, .. } => offers,
+            other => panic!("not receiving: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_charger_offers_mark_the_negotiated_one() {
+        // A 60 W charger on a Framework Laptop 13: the UCSI firmware never
+        // exposes the identity, but the PDOs and the contract are there.
+        let charger = Partner {
+            power: Some(PowerCapabilities {
+                source: vec![
+                    Pdo::FixedSupply { voltage_mv: 5000, current_ma: 3000 },
+                    Pdo::FixedSupply { voltage_mv: 9000, current_ma: 3000 },
+                    Pdo::FixedSupply { voltage_mv: 15000, current_ma: 3000 },
+                    Pdo::FixedSupply { voltage_mv: 20000, current_ma: 3000 },
+                    Pdo::ProgrammableSupply {
+                        min_voltage_mv: 3300,
+                        max_voltage_mv: 21000,
+                        max_current_ma: 3000,
+                    },
+                ],
+                sink: vec![],
+            }),
+            ..Default::default()
+        };
+        let mut port = sinking_port(PowerOpMode::UsbPowerDelivery, true, 20000, 3000);
+        port.partner = Some(charger);
+
+        let summary = summarize(&port);
+        let device = summary.device.as_ref().unwrap();
+        assert!(!device.identified);
+        assert!(device.identity_unavailable);
+
+        let offers = offers_of(&port);
+        assert_eq!(offers.len(), 5);
+        assert_eq!(offers[0], offer("15 W", "5 V · 3 A", false));
+        assert_eq!(offers[3], offer("60 W", "20 V · 3 A", true));
+        assert_eq!(
+            offers[4],
+            offer("Adjustable voltage (PPS)", "3.3–21 V · up to 3 A", false)
+        );
+        assert_eq!(offers.iter().filter(|o| o.active).count(), 1);
+
+        // Renegotiated to 9 V: the mark follows the contract.
+        port.contract.as_mut().unwrap().voltage_mv = 9000;
+        let offers = offers_of(&port);
+        assert!(offers[1].active);
+        assert!(!offers[3].active);
+
+        // A PPS contract at 11 V marks the adjustable range, not a fixed offer.
+        let c = port.contract.as_mut().unwrap();
+        c.pps = true;
+        c.voltage_mv = 11000;
+        c.current_ma = 2000;
+        let offers = offers_of(&port);
+        assert!(offers[4].active);
+        assert_eq!(offers.iter().filter(|o| o.active).count(), 1);
+
+        // Offline supply: the offers stay, nothing is in use.
+        port.contract.as_mut().unwrap().online = false;
+        assert!(offers_of(&port).iter().all(|o| !o.active));
+    }
+
+    #[test]
+    fn test_identity_zero_but_exposed_is_the_devices_fault() {
+        // The kernel asked (identity attributes exist) and got nothing back.
+        let silent = Partner {
+            identity_exposed: true,
+            ..Default::default()
+        };
+        let s = summarize(&port(PowerRole::Source, Some(silent), None));
+        let device = s.device.unwrap();
+        assert!(!device.identified);
+        assert!(!device.identity_unavailable);
+    }
+
+    #[test]
+    fn test_describe_pdo() {
+        assert_eq!(
+            describe_pdo(&Pdo::FixedSupply { voltage_mv: 20000, current_ma: 2250 }),
+            ("45 W".to_string(), "20 V · 2.25 A".to_string())
+        );
+        assert_eq!(
+            describe_pdo(&Pdo::SprAvs {
+                max_current_9v_to_15v_ma: 3000,
+                max_current_15v_to_20v_ma: 2250,
+            }),
+            (
+                "Adjustable voltage (AVS)".to_string(),
+                "9–20 V · up to 3 A below 15 V, 2.25 A above".to_string()
+            )
+        );
+        assert_eq!(
+            describe_pdo(&Pdo::VariableSupply {
+                min_voltage_mv: 5000,
+                max_voltage_mv: 21000,
+                current_ma: 900
+            }),
+            ("Variable voltage".to_string(), "5–21 V · 0.9 A".to_string())
+        );
+        assert_eq!(
+            describe_pdo(&Pdo::Battery {
+                min_voltage_mv: 5000,
+                max_voltage_mv: 21000,
+                power_mw: 60000
+            }),
+            ("60 W (battery)".to_string(), "5–21 V".to_string())
+        );
     }
 
     #[test]

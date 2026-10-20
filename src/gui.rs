@@ -12,7 +12,7 @@ use gtk::glib;
 
 use crate::display;
 use crate::monitor;
-use crate::summary::{self, CableSummary, Overall, PortSummary, PowerFlow};
+use crate::summary::{self, CableSummary, Overall, PortSummary, PowerFlow, PowerOffer};
 use crate::sysfs;
 
 const APP_ID: &str = "io.github.usbc.Usbc";
@@ -315,14 +315,20 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
     };
 
     // A short feature list on an unidentified device would look like a bug,
-    // so say why there's nothing more to show.
+    // so say why there's nothing more to show. When the port driver never
+    // asks the device, don't blame the device.
+    let (alone, after_features) = if device.identity_unavailable {
+        (
+            "This computer's firmware doesn't share device details",
+            "this computer's firmware doesn't share more",
+        )
+    } else {
+        ("Device didn't report its details", "no other details reported")
+    };
     let device_detail = match (device.identified, device.features.is_empty()) {
         (true, _) => device.features.join(" · "),
-        (false, true) => "Device didn't report its details".to_string(),
-        (false, false) => format!(
-            "{} · no other details reported",
-            device.features.join(" · ")
-        ),
+        (false, true) => alone.to_string(),
+        (false, false) => format!("{} · {after_features}", device.features.join(" · ")),
     };
     group.add(&row(
         device.kind.icon_name(),
@@ -330,13 +336,14 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
         &device_detail,
     ));
 
-    match device.power {
+    match &device.power {
         PowerFlow::Receiving {
             max_milliwatts,
             pd,
             negotiated_milliwatts,
+            offers,
         } => {
-            let detail = match (negotiated_milliwatts, max_milliwatts, pd) {
+            let detail = match (*negotiated_milliwatts, *max_milliwatts, *pd) {
                 (Some(now), Some(mw), true) if mw > now => format!(
                     "Charging at {}, up to {} available",
                     summary::format_watts(now),
@@ -355,13 +362,13 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
                 ),
                 (None, None, _) => "Power available".to_string(),
             };
-            group.add(&row("ac-adapter-symbolic", "Powering this computer", &detail));
+            group.add(&charging_row(&detail, offers));
         }
         PowerFlow::Standby {
             max_milliwatts,
             negotiated_milliwatts,
         } => {
-            let detail = match negotiated_milliwatts.or(max_milliwatts) {
+            let detail = match negotiated_milliwatts.or(*max_milliwatts) {
                 Some(mw) => format!(
                     "{} ready, but this computer is drawing power from somewhere else",
                     summary::format_watts(mw)
@@ -374,7 +381,7 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
             max_milliwatts,
             negotiated_milliwatts,
         } => {
-            let detail = match (negotiated_milliwatts, max_milliwatts) {
+            let detail = match (*negotiated_milliwatts, *max_milliwatts) {
                 (Some(now), Some(mw)) if mw > now => format!(
                     "Supplying {}, this port can give up to {}",
                     summary::format_watts(now),
@@ -443,6 +450,44 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
     }
 
     group
+}
+
+/// "Powering this computer", expanded to list every way the charger offered
+/// to supply power, with the one the contract selected marked. A plain row
+/// when the charger's offers aren't known.
+fn charging_row(detail: &str, offers: &[PowerOffer]) -> gtk::Widget {
+    const TITLE: &str = "Powering this computer";
+    if offers.is_empty() {
+        return row("ac-adapter-symbolic", TITLE, detail).upcast();
+    }
+    let expander = adw::ExpanderRow::builder()
+        .title(glib::markup_escape_text(TITLE))
+        .subtitle(glib::markup_escape_text(detail))
+        .expanded(true)
+        .build();
+    expander.add_prefix(&gtk::Image::from_icon_name("ac-adapter-symbolic"));
+    for offer in offers {
+        let r = adw::ActionRow::builder()
+            .title(glib::markup_escape_text(&offer.title))
+            .subtitle(glib::markup_escape_text(&offer.detail))
+            .build();
+        if offer.active {
+            r.add_suffix(
+                &gtk::Label::builder()
+                    .label("In use")
+                    .css_classes(["caption", "accent"])
+                    .build(),
+            );
+            r.add_suffix(
+                &gtk::Image::builder()
+                    .icon_name("object-select-symbolic")
+                    .css_classes(["accent"])
+                    .build(),
+            );
+        }
+        expander.add_row(&r);
+    }
+    expander.upcast()
 }
 
 fn row(icon: &str, title: &str, subtitle: &str) -> adw::ActionRow {

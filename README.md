@@ -116,7 +116,15 @@ $ usbc gui
 Opens a window that explains each USB-C port in plain language: what's
 plugged in (dock, display, charger, ...), whether it's charging the computer
 and at how many watts, how fast the cable is, and what to do if the cable is
-holding a device back. It updates live as you plug and unplug things.
+holding a device back. For a charger it lists every power mode the charger
+offers (for example 5 V, 9 V, 15 V, 20 V and an adjustable PPS range) and
+marks the one the computer negotiated. It updates live as you plug and unplug
+things.
+
+On many laptops the window says the computer's firmware doesn't share device
+details. That is a limit of the USB-C controller firmware (UCSI without
+`GET_PD_MESSAGE`), not of the device: the kernel never gets to ask the device
+who it is, so it can't tell a dock from a display on that port.
 
 A **Technical Details** section at the bottom shows the same data as
 `usbc status -v`, with a button to copy it for a support request.

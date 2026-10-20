@@ -201,6 +201,12 @@ pub struct Partner {
     pub num_alt_modes: Option<u32>,
     /// `accessory_mode`, e.g. "none", "analog_audio", "debug".
     pub accessory_mode: Option<String>,
+    /// The kernel exposes `identity` attributes for this partner, so an
+    /// all-zero identity means the partner didn't answer Discover Identity.
+    /// False when the port driver never asks: UCSI only relays PD messages
+    /// when the controller firmware supports GET_PD_MESSAGE, and much laptop
+    /// firmware doesn't. Then no partner is ever identified on this port.
+    pub identity_exposed: bool,
 }
 
 #[derive(Debug, Clone, Default)]
