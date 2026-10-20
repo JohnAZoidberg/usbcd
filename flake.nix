@@ -18,10 +18,11 @@
             pname = if gui then "usbc-gui" else "usbc";
             version = "0.1.0";
             src = ./.;
-            cargoHash = "sha256-uGIlf5ZP6U+yzLLGfPzG/bxNjXbR8u+qvVihLaGagTw=";
+            cargoHash = "sha256-R5Zvq2kGS1rqUt5KQs5bBKZmR8eOt5jPV0kLMDHlS3Y=";
             buildFeatures = pkgs.lib.optional gui "gui";
             nativeBuildInputs = [ pkgs.pkg-config ]
-              ++ pkgs.lib.optional gui pkgs.wrapGAppsHook4;
+              # glib-compile-resources for build.rs, plus the GTK wrapper.
+              ++ pkgs.lib.optionals gui [ pkgs.glib pkgs.wrapGAppsHook4 ];
             buildInputs = [ pkgs.systemdMinimal ]
               ++ pkgs.lib.optionals gui [ pkgs.gtk4 pkgs.libadwaita ];
             postInstall = pkgs.lib.optionalString gui ''
@@ -46,6 +47,7 @@
               pkgs.rustc
               pkgs.cargo
               pkgs.pkg-config
+              pkgs.glib # glib-compile-resources, for build.rs
             ];
             buildInputs = [
               pkgs.systemdMinimal

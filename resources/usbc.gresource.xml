@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Icons the window uses that only the Adwaita theme provides. GTK adds
+  <resource base path>/icons to the icon search path automatically, so these
+  resolve on any icon theme (Breeze on KDE, for example) without falling back
+  to a "missing image" placeholder.
+-->
+<gresources>
+  <gresource prefix="/io/github/usbc/Usbc">
+    <file preprocess="xml-stripblanks">icons/scalable/actions/ac-adapter-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/thunderbolt-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/video-display-symbolic.svg</file>
+  </gresource>
+</gresources>

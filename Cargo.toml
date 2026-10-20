@@ -13,9 +13,13 @@ libc = "0.2"
 gtk = { package = "gtk4", version = "0.11", features = ["v4_12"], optional = true }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"], optional = true }
 
+[build-dependencies]
+# Compiles resources/ into the binary; see build.rs. Needs glib-compile-resources.
+glib-build-tools = { version = "0.22", optional = true }
+
 [features]
 # Desktop GUI (`usbc gui`). Needs GTK 4 and libadwaita development files.
-gui = ["dep:gtk", "dep:adw"]
+gui = ["dep:gtk", "dep:adw", "dep:glib-build-tools"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -188,7 +188,9 @@ cargo build --release
 ```
 
 For the desktop app (`usbc gui`) you also need GTK 4 (4.12+) and libadwaita
-(1.5+) development files:
+(1.5+) development files. The build also runs `glib-compile-resources`, which
+those packages pull in, to bundle a few icons so the window looks right on
+any icon theme:
 
 ```sh
 sudo apt install libgtk-4-dev libadwaita-1-dev        # Debian/Ubuntu

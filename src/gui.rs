@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 
 use crate::display;
 use crate::monitor;
@@ -25,6 +25,10 @@ const DEBOUNCE: Duration = Duration::from_millis(750);
 const NARROW_WIDTH_SP: f64 = 720.0;
 
 pub fn run() -> glib::ExitCode {
+    // Icons under /io/github/usbc/Usbc/icons/ (built by build.rs) that not every
+    // icon theme ships; GTK searches that path because it matches APP_ID.
+    gio::resources_register_include!("usbc.gresource")
+        .expect("bundled icons are compiled into the binary");
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_window);
     // clap already consumed our arguments; don't let GTK see "gui".
