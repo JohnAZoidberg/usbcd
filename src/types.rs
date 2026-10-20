@@ -277,6 +277,21 @@ impl Port {
         self.partner.is_some() || self.contract.as_ref().is_some_and(|c| c.online)
     }
 
+    /// The power role, corrected by the power supply. The typec `power_role`
+    /// attribute only changes when the port driver reports a role change,
+    /// and some UCSI firmware leaves it at `source` while a charger is
+    /// powering the computer. The power supply's `online` is read from the
+    /// live connector status and is only set while sinking, so it wins. The
+    /// converse doesn't hold: a sink can be offline (tcpm while charging is
+    /// disabled), so an offline supply doesn't make the port a source.
+    pub fn effective_power_role(&self) -> PowerRole {
+        if self.contract.as_ref().is_some_and(|c| c.online) {
+            PowerRole::Sink
+        } else {
+            self.power_role
+        }
+    }
+
     /// Whether the partner talks PD. The partner's `supports_usb_power_delivery`
     /// is set once at registration, which can happen during the Type-C
     /// current phase before the PD contract, so a live PD contract wins.

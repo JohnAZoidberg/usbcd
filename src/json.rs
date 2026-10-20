@@ -26,6 +26,11 @@ fn write_port(out: &mut String, port: &Port) {
     field(out, "number", &port.number.to_string());
     field(out, "data_role", &quoted(&port.data_role.to_string()));
     field(out, "power_role", &quoted(&port.power_role.to_string()));
+    field(
+        out,
+        "effective_power_role",
+        &quoted(&port.effective_power_role().to_string()),
+    );
     field(out, "power_operation_mode", &quoted(&opmode_id(&port.power_operation_mode)));
     field(out, "connected", &port.is_connected().to_string());
     field(

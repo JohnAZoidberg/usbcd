@@ -49,7 +49,7 @@ struct PortState {
 fn state_of(port: &Port) -> PortState {
     PortState {
         connected: port.is_connected(),
-        power_role: port.power_role,
+        power_role: port.effective_power_role(),
         data_role: port.data_role,
         contract: if port.is_connected() {
             port.contract.clone()
@@ -249,7 +249,9 @@ fn log_connect(port: &Port) {
 
     log!(
         "port {}: connected — {who} [{}/{}], {cable_str}{contract_str}",
-        port.number, port.data_role, port.power_role
+        port.number,
+        port.data_role,
+        display::power_role_label(port)
     );
 }
 

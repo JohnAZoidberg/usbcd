@@ -156,7 +156,7 @@ fn summarize_device(port: &Port) -> Option<DeviceSummary> {
     if !port.is_connected() {
         return None;
     }
-    let kind = if port.power_role == PowerRole::Sink {
+    let kind = if port.effective_power_role() == PowerRole::Sink {
         DeviceKind::Charger
     } else {
         DeviceKind::Unknown
@@ -170,7 +170,7 @@ fn summarize_device(port: &Port) -> Option<DeviceSummary> {
 }
 
 fn power_flow(port: &Port, partner: Option<&Partner>) -> PowerFlow {
-    match port.power_role {
+    match port.effective_power_role() {
         PowerRole::Sink => {
             let pd_milliwatts = partner
                 .and_then(|p| p.power.as_ref())
@@ -249,7 +249,7 @@ fn device_kind(port: &Port, partner: &Partner) -> DeviceKind {
     match dfp {
         2 => DeviceKind::Computer,
         3 => DeviceKind::Charger,
-        _ if port.power_role == PowerRole::Sink => DeviceKind::Charger,
+        _ if port.effective_power_role() == PowerRole::Sink => DeviceKind::Charger,
         _ => DeviceKind::Unknown,
     }
 }
@@ -513,6 +513,28 @@ mod tests {
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Unknown);
         assert_eq!(device.power, PowerFlow::Supplying);
+    }
+
+    #[test]
+    fn test_online_supply_overrides_stale_source_role() {
+        // UCSI left power_role at "source", but the port's supply is online:
+        // a charger is powering the computer.
+        let mut port = sinking_port(PowerOpMode::UsbPowerDelivery, true, 20000, 4700);
+        port.power_role = PowerRole::Source;
+        port.partner = Some(Partner {
+            supports_pd: Some(true),
+            ..Default::default()
+        });
+        let device = summarize(&port).device.unwrap();
+        assert_eq!(device.kind, DeviceKind::Charger);
+        assert_eq!(
+            device.power,
+            PowerFlow::Receiving {
+                max_milliwatts: None,
+                pd: true,
+                negotiated_milliwatts: Some(94_000),
+            }
+        );
     }
 
     #[test]

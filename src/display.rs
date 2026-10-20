@@ -73,7 +73,7 @@ pub fn contract_summary(port: &Port) -> Option<String> {
             c.milliwatts() / 1000
         )
     };
-    match port.power_role {
+    match port.effective_power_role() {
         PowerRole::Sink => Some(if c.has_values() {
             format!("{} ({kind}, {})", values(), c.status.to_lowercase())
         } else {
@@ -91,6 +91,16 @@ pub fn contract_summary(port: &Port) -> Option<String> {
             }
         }
         PowerRole::None => None,
+    }
+}
+
+/// The effective power role, noting the kernel's attribute when it is stale.
+pub fn power_role_label(port: &Port) -> String {
+    let role = port.effective_power_role();
+    if role == port.power_role {
+        role.to_string()
+    } else {
+        format!("{role} (kernel says {})", port.power_role)
     }
 }
 
@@ -122,7 +132,9 @@ fn write_port(out: &mut String, port: &Port, verbose: bool) {
     w!(
         out,
         "Port {} [{}/{}{tag_str}]",
-        port.number, port.data_role, port.power_role
+        port.number,
+        port.data_role,
+        power_role_label(port)
     );
 
     if verbose {
@@ -304,7 +316,7 @@ fn write_partner(out: &mut String, partner: &Partner, port: &Port, verbose: bool
         // sourcing, and what the partner offers. The laptop's own sink
         // capabilities are not the contract, so they only appear in verbose.
         if let Some(power) = &port.power {
-            if port.power_role == PowerRole::Source && !power.source.is_empty() {
+            if port.effective_power_role() == PowerRole::Source && !power.source.is_empty() {
                 w!(
                     out,
                     "    Port can source: {}",
@@ -721,6 +733,20 @@ mod tests {
         assert_eq!(port.partner_supports_pd(), Some(true));
         let (text, _) = render_status(&[port], false);
         assert!(text.contains("  Partner: device (PD, no identity reported)\n"));
+    }
+
+    #[test]
+    fn test_online_supply_overrides_stale_source_role() {
+        let port = Port {
+            power_role: PowerRole::Source,
+            ..sink_port(Some(charging(20000, 4700)), Some(Partner::default()))
+        };
+        assert_eq!(
+            contract_summary(&port).as_deref(),
+            Some("20.0V 4.7A 94W (PD, charging)")
+        );
+        let (text, _) = render_status(&[port], false);
+        assert!(text.contains("Port 2 [host/sink (kernel says source), PD]\n"));
     }
 
     #[test]

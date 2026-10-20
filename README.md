@@ -60,6 +60,13 @@ power supply reports it `online`. `power_operation_mode` alone is not trusted:
 some UCSI firmware never clears it after a detach, and it would otherwise show
 a charger that is long gone.
 
+The power supply also settles which way power flows. Some UCSI firmware
+leaves the port's `power_role` at `source` while a charger is powering the
+computer; the supply is only `online` while sinking, so in that case the port
+is shown as a sink and the header notes the stale attribute, e.g.
+`Port 0 [host/sink (kernel says source), PD]`. `--json` reports both as
+`power_role` (the attribute) and `effective_power_role`.
+
 Partners and cables that never answered Discover Identity (common with
 chargers, and on machines whose PD firmware doesn't forward identity) still
 show what the kernel knows: PD yes/no, passive/active, plug type, PDOs.
