@@ -294,12 +294,24 @@ fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
             };
             group.add(&row("ac-adapter-symbolic", "Powering this computer", &detail));
         }
-        PowerFlow::Supplying => {
-            group.add(&row(
-                "ac-adapter-symbolic",
-                "Powered by this computer",
-                "This computer is supplying power to the device",
-            ));
+        PowerFlow::Supplying {
+            max_milliwatts,
+            negotiated_milliwatts,
+        } => {
+            let detail = match (negotiated_milliwatts, max_milliwatts) {
+                (Some(now), Some(mw)) if mw > now => format!(
+                    "Supplying {}, this port can give up to {}",
+                    summary::format_watts(now),
+                    summary::format_watts(mw)
+                ),
+                (Some(now), _) => format!("Supplying {}", summary::format_watts(now)),
+                (None, Some(mw)) => format!(
+                    "This computer is supplying power, up to {}",
+                    summary::format_watts(mw)
+                ),
+                (None, None) => "This computer is supplying power to the device".to_string(),
+            };
+            group.add(&row("ac-adapter-symbolic", "Powered by this computer", &detail));
         }
         PowerFlow::Unknown => {}
     }

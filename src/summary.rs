@@ -82,7 +82,14 @@ pub enum PowerFlow {
         negotiated_milliwatts: Option<u32>,
     },
     /// The laptop is powering this device.
-    Supplying,
+    ///
+    /// `max_milliwatts` is the most the port offers, from its own source
+    /// capabilities. `negotiated_milliwatts` is what the kernel reports for
+    /// the contract; under PD it has no values while sourcing.
+    Supplying {
+        max_milliwatts: Option<u32>,
+        negotiated_milliwatts: Option<u32>,
+    },
     Unknown,
 }
 
@@ -193,7 +200,18 @@ fn power_flow(port: &Port, partner: Option<&Partner>) -> PowerFlow {
                 negotiated_milliwatts,
             }
         }
-        PowerRole::Source => PowerFlow::Supplying,
+        PowerRole::Source => PowerFlow::Supplying {
+            max_milliwatts: port
+                .power
+                .as_ref()
+                .and_then(|p| max_fixed_milliwatts(&p.source)),
+            // The supply is never online while sourcing, so don't filter on it.
+            negotiated_milliwatts: port
+                .contract
+                .as_ref()
+                .filter(|c| c.has_values())
+                .map(|c| c.milliwatts()),
+        },
         PowerRole::None => PowerFlow::Unknown,
     }
 }
@@ -512,7 +530,37 @@ mod tests {
         let s = summarize(&port);
         let device = s.device.as_ref().unwrap();
         assert_eq!(device.kind, DeviceKind::Unknown);
-        assert_eq!(device.power, PowerFlow::Supplying);
+        assert_eq!(
+            device.power,
+            PowerFlow::Supplying {
+                max_milliwatts: None,
+                negotiated_milliwatts: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_supplying_reports_watts() {
+        let mut port = port_with_mode(PowerRole::Source, PowerOpMode::Current15A);
+        port.partner = Some(Partner::default());
+        port.power = Some(PowerCapabilities {
+            source: vec![Pdo::FixedSupply { voltage_mv: 5000, current_ma: 3000 }],
+            sink: vec![],
+        });
+        port.contract = Some(Contract {
+            online: false,
+            status: "Discharging".into(),
+            voltage_mv: 5000,
+            current_ma: 1500,
+            ..Default::default()
+        });
+        assert_eq!(
+            summarize(&port).device.unwrap().power,
+            PowerFlow::Supplying {
+                max_milliwatts: Some(15_000),
+                negotiated_milliwatts: Some(7_500),
+            }
+        );
     }
 
     #[test]
@@ -671,7 +719,13 @@ mod tests {
             Some(passive_cable(HP_USB32_GEN1)),
         ));
         assert_eq!(s.device.as_ref().unwrap().kind, DeviceKind::Display);
-        assert_eq!(s.device.as_ref().unwrap().power, PowerFlow::Supplying);
+        assert_eq!(
+            s.device.as_ref().unwrap().power,
+            PowerFlow::Supplying {
+                max_milliwatts: None,
+                negotiated_milliwatts: None,
+            }
+        );
         assert!(s.issues.is_empty());
         assert_eq!(overall(&[s]), Overall::AllGood);
     }
