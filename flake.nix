@@ -52,6 +52,15 @@
               pkgs.gtk4
               pkgs.libadwaita
             ];
+            # Binaries built here get no RUNPATH for these, so running
+            # ./target/debug/usbc directly (not via cargo run) needs them.
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.systemdMinimal
+              pkgs.gtk4
+              pkgs.libadwaita
+              pkgs.pango
+              pkgs.glib
+            ];
           };
         });
     };
