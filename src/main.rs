@@ -1,7 +1,11 @@
 mod display;
+#[cfg(feature = "gui")]
+mod gui;
 mod monitor;
 mod notify;
 mod quality;
+#[cfg(any(feature = "gui", test))]
+mod summary;
 #[allow(dead_code)]
 mod sysfs;
 #[allow(dead_code)]
@@ -28,6 +32,9 @@ enum Commands {
     },
     /// Watch for USB-C events and send desktop notifications for cable quality issues
     Monitor,
+    /// Open a window showing USB-C status in plain language
+    #[cfg(feature = "gui")]
+    Gui,
 }
 
 #[tokio::main]
@@ -47,6 +54,10 @@ async fn main() {
                 eprintln!("usbc monitor error: {e}");
                 std::process::exit(1);
             }
+        }
+        #[cfg(feature = "gui")]
+        Commands::Gui => {
+            std::process::exit(gui::run().get().into());
         }
     }
 }

@@ -60,6 +60,26 @@ suboptimal. Already-connected devices are scanned on startup.
 Notifications are sent via D-Bus (`org.freedesktop.Notifications`) and work
 with any compliant notification daemon (mako, dunst, GNOME Shell, KDE).
 
+### Desktop app
+
+```
+$ usbc gui
+```
+
+Opens a window that explains each USB-C port in plain language: what's
+plugged in (dock, display, charger, ...), whether it's charging the computer
+and at how many watts, how fast the cable is, and what to do if the cable is
+holding a device back. It updates live as you plug and unplug things.
+
+A **Technical Details** section at the bottom shows the same data as
+`usbc status -v`, with a button to copy it for a support request.
+
+The GUI is an optional build feature (`--features gui`) because it pulls in
+GTK 4 and libadwaita; the CLI and monitor don't need them.
+
+To try the UI without USB-C hardware, point it at a fake sysfs tree:
+`USBC_SYSFS_ROOT=/path/to/fake usbc gui` (this also works for `usbc status`).
+
 ## Building
 
 ### Nix (recommended)
@@ -70,6 +90,13 @@ nix build
 
 # or run directly
 nix run . -- status
+```
+
+With the desktop app:
+
+```sh
+nix build .#gui
+nix run .#gui -- gui
 ```
 
 For development:
@@ -105,6 +132,17 @@ cargo build --release
 # binary is at target/release/usbc
 ```
 
+For the desktop app (`usbc gui`) you also need GTK 4 (4.12+) and libadwaita
+(1.5+) development files:
+
+```sh
+sudo apt install libgtk-4-dev libadwaita-1-dev        # Debian/Ubuntu
+sudo dnf install gtk4-devel libadwaita-devel          # Fedora
+sudo pacman -S gtk4 libadwaita                        # Arch
+
+cargo build --release --features gui
+```
+
 ## Install
 
 Copy the binary somewhere on your PATH:
@@ -113,6 +151,13 @@ Copy the binary somewhere on your PATH:
 cargo install --path .
 # or
 cp target/release/usbc ~/.local/bin/
+```
+
+To get the desktop app in your application launcher, also install the
+desktop entry:
+
+```sh
+cp usbc.desktop ~/.local/share/applications/
 ```
 
 ## Running as a systemd user service

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=USB-C Status
+Comment=See what's plugged into your USB-C ports and whether the cable is good enough
+Exec=usbc gui
+Icon=thunderbolt-symbolic
+Terminal=false
+Categories=System;Utility;HardwareSettings;Settings;
+Keywords=USB;USB-C;Type-C;Thunderbolt;USB4;cable;charger;dock;

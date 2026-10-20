@@ -103,21 +103,22 @@ pub struct VdoField {
     pub values: &'static [(u32, &'static str)],
 }
 
-/// Decode and print all fields of a VDO, indented under a header.
-pub fn print_vdo_fields(vdo: u32, fields: &[VdoField], indent: &str) {
+/// Decode and write all fields of a VDO, indented under a header.
+pub fn write_vdo_fields(out: &mut String, vdo: u32, fields: &[VdoField], indent: &str) {
+    use std::fmt::Write;
     for f in fields {
         let val = field(vdo, f.offset, f.mask);
         let desc = f.values.iter().find(|(v, _)| *v == val).map(|(_, d)| *d);
-        match desc {
-            Some(d) => println!("{indent}  {}: {d}", f.name),
+        let _ = match desc {
+            Some(d) => writeln!(out, "{indent}  {}: {d}", f.name),
             None => {
                 if f.mask <= 0xf {
-                    println!("{indent}  {}: {val}", f.name);
+                    writeln!(out, "{indent}  {}: {val}", f.name)
                 } else {
-                    println!("{indent}  {}: {val:#x}", f.name);
+                    writeln!(out, "{indent}  {}: {val:#x}", f.name)
                 }
             }
-        }
+        };
     }
 }
 

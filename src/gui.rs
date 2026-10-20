@@ -1,0 +1,330 @@
+// Desktop window showing USB-C port status in plain language.
+//
+// Rebuilds the port list from sysfs whenever udev reports a USB-C change, so plugging
+// and unplugging updates the window live.
+
+use std::rc::Rc;
+use std::time::Duration;
+
+use adw::prelude::*;
+use gtk::glib;
+
+use crate::display;
+use crate::monitor;
+use crate::summary::{self, CableSummary, Overall, PortSummary, PowerFlow};
+use crate::sysfs;
+
+const APP_ID: &str = "io.github.usbc.Usbc";
+
+/// Wait for the kernel to finish PD discovery before rescanning; a single
+/// plug event produces a burst of partner/cable/altmode uevents.
+const DEBOUNCE: Duration = Duration::from_millis(750);
+
+pub fn run() -> glib::ExitCode {
+    let app = adw::Application::builder().application_id(APP_ID).build();
+    app.connect_activate(build_window);
+    // clap already consumed our arguments; don't let GTK see "gui".
+    app.run_with_args::<&str>(&[])
+}
+
+struct Ui {
+    window: adw::ApplicationWindow,
+    stack: gtk::Stack,
+    ports_box: gtk::Box,
+    report: gtk::Label,
+    toasts: adw::ToastOverlay,
+}
+
+fn build_window(app: &adw::Application) {
+    if let Some(window) = app.active_window() {
+        window.present();
+        return;
+    }
+
+    let refresh_button = gtk::Button::builder()
+        .icon_name("view-refresh-symbolic")
+        .tooltip_text("Refresh")
+        .build();
+    let header = adw::HeaderBar::new();
+    header.pack_start(&refresh_button);
+
+    let ports_box = gtk::Box::new(gtk::Orientation::Vertical, 24);
+
+    let report = gtk::Label::builder()
+        .xalign(0.0)
+        .selectable(true)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .css_classes(["monospace", "caption"])
+        .build();
+    let report_row = adw::ExpanderRow::builder()
+        .title("Show raw port data")
+        .subtitle("Include this when asking for help")
+        .build();
+    report_row.add_row(&report);
+
+    let copy_button = gtk::Button::builder()
+        .icon_name("edit-copy-symbolic")
+        .tooltip_text("Copy technical details")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    let details_group = adw::PreferencesGroup::builder()
+        .title("Technical Details")
+        .header_suffix(&copy_button)
+        .build();
+    details_group.add(&report_row);
+
+    let page = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(24)
+        .margin_top(24)
+        .margin_bottom(24)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    page.append(&ports_box);
+    page.append(&details_group);
+
+    let scrolled = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&adw::Clamp::builder().maximum_size(640).child(&page).build())
+        .build();
+
+    let empty = adw::StatusPage::builder()
+        .icon_name("dialog-question-symbolic")
+        .title("No USB-C Ports Found")
+        .description(
+            "Your computer didn't report any USB-C ports to Linux. \
+             This can happen when the USB-C driver fails to start during boot. \
+             Restarting the computer often fixes it.\n\n\
+             Advanced: run <tt>sudo modprobe -r ucsi_acpi &amp;&amp; sudo modprobe ucsi_acpi</tt>",
+        )
+        .build();
+
+    let stack = gtk::Stack::new();
+    stack.add_named(&scrolled, Some("ports"));
+    stack.add_named(&empty, Some("empty"));
+
+    let toasts = adw::ToastOverlay::new();
+    toasts.set_child(Some(&stack));
+
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&toasts));
+
+    let window = adw::ApplicationWindow::builder()
+        .application(app)
+        .title("USB-C Status")
+        .default_width(560)
+        .default_height(720)
+        .content(&toolbar)
+        .build();
+
+    let ui = Rc::new(Ui {
+        window,
+        stack,
+        ports_box,
+        report,
+        toasts,
+    });
+
+    refresh_button.connect_clicked({
+        let ui = ui.clone();
+        move |_| refresh(&ui)
+    });
+    copy_button.connect_clicked({
+        let ui = ui.clone();
+        move |_| {
+            ui.window.clipboard().set_text(&ui.report.text());
+            ui.toasts.add_toast(adw::Toast::new("Copied to clipboard"));
+        }
+    });
+
+    watch_udev({
+        let ui = ui.clone();
+        move || refresh(&ui)
+    });
+
+    refresh(&ui);
+    ui.window.present();
+}
+
+/// Call `on_change` (debounced) whenever the kernel reports a USB-C change.
+fn watch_udev(on_change: impl Fn() + 'static) {
+    let mut rx = monitor::spawn_udev_watcher();
+    glib::spawn_future_local(async move {
+        while rx.recv().await.is_some() {
+            glib::timeout_future(DEBOUNCE).await;
+            while rx.try_recv().is_ok() {}
+            on_change();
+        }
+    });
+}
+
+fn refresh(ui: &Ui) {
+    let ports = sysfs::scan_ports();
+    let (report, _) = display::render_status(&ports, true);
+    ui.report.set_text(report.trim_end());
+
+    if ports.is_empty() {
+        ui.stack.set_visible_child_name("empty");
+        return;
+    }
+    ui.stack.set_visible_child_name("ports");
+
+    while let Some(child) = ui.ports_box.first_child() {
+        ui.ports_box.remove(&child);
+    }
+
+    let summaries: Vec<PortSummary> = ports.iter().map(summary::summarize).collect();
+    ui.ports_box.append(&headline(summary::overall(&summaries)));
+    for s in &summaries {
+        ui.ports_box.append(&port_group(s));
+    }
+}
+
+fn headline(overall: Overall) -> gtk::Box {
+    let (icon, css, title, subtitle) = match overall {
+        Overall::Issues(n) => (
+            "dialog-warning-symbolic",
+            "warning",
+            if n == 1 {
+                "1 cable problem found".to_string()
+            } else {
+                format!("{n} cable problems found")
+            },
+            "A cable is preventing a device from working at its best. See below for what to do.",
+        ),
+        Overall::AllGood => (
+            "object-select-symbolic",
+            "success",
+            "Everything looks good".to_string(),
+            "Your cables support everything the connected devices can do.",
+        ),
+        Overall::NothingConnected | Overall::NoPorts => (
+            "network-wired-disconnected-symbolic",
+            "dim-label",
+            "Nothing plugged in".to_string(),
+            "Connect a device to a USB-C port to check its cable.",
+        ),
+    };
+
+    let image = gtk::Image::builder()
+        .icon_name(icon)
+        .pixel_size(48)
+        .css_classes([css])
+        .build();
+    let title = gtk::Label::builder()
+        .label(title)
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["title-2"])
+        .build();
+    let subtitle = gtk::Label::builder()
+        .label(subtitle)
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label"])
+        .build();
+
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    text.set_valign(gtk::Align::Center);
+    text.append(&title);
+    text.append(&subtitle);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+    row.set_margin_start(6);
+    row.append(&image);
+    row.append(&text);
+    row
+}
+
+fn port_group(s: &PortSummary) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title(format!("Port {}", s.number))
+        .build();
+
+    let Some(device) = &s.device else {
+        group.set_description(Some("Nothing connected"));
+        return group;
+    };
+
+    group.add(&row(
+        device.kind.icon_name(),
+        device.kind.label(),
+        &device.features.join(" · "),
+    ));
+
+    match device.power {
+        PowerFlow::Receiving { max_watts } => {
+            let detail = match max_watts {
+                Some(w) => format!("Up to {w} W available"),
+                None => "Power available".to_string(),
+            };
+            group.add(&row("ac-adapter-symbolic", "Powering this computer", &detail));
+        }
+        PowerFlow::Supplying => {
+            group.add(&row(
+                "ac-adapter-symbolic",
+                "Powered by this computer",
+                "This computer is supplying power to the device",
+            ));
+        }
+        PowerFlow::Unknown => {}
+    }
+
+    let cable_detail = match &s.cable {
+        CableSummary::Identified {
+            active,
+            speed,
+            max_watts,
+        } => {
+            let mut parts = vec![format!("Data up to {speed}")];
+            if let Some(w) = max_watts {
+                parts.push(format!("power up to {w} W"));
+            }
+            if *active {
+                parts.push("active cable".to_string());
+            }
+            parts.join(" · ")
+        }
+        // Often the computer simply can't ask (e.g. while it's being charged),
+        // so don't blame the cable here.
+        CableSummary::Unidentified => "Speed and power rating not reported".to_string(),
+    };
+    group.add(&row("network-wired-symbolic", "Cable", &cable_detail));
+
+    for issue in &s.issues {
+        group.add(&warning_row(issue.title, issue.advice));
+    }
+
+    group
+}
+
+fn row(icon: &str, title: &str, subtitle: &str) -> adw::ActionRow {
+    let r = adw::ActionRow::builder()
+        .title(glib::markup_escape_text(title))
+        .subtitle(glib::markup_escape_text(subtitle))
+        .build();
+    r.add_prefix(&gtk::Image::from_icon_name(icon));
+    r
+}
+
+fn warning_row(title: &str, advice: &str) -> adw::ActionRow {
+    let r = adw::ActionRow::builder()
+        .title(glib::markup_escape_text(title))
+        .subtitle(glib::markup_escape_text(advice))
+        .build();
+    r.add_prefix(
+        &gtk::Image::builder()
+            .icon_name("dialog-warning-symbolic")
+            .css_classes(["warning"])
+            .build(),
+    );
+    r
+}

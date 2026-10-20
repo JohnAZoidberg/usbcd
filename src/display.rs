@@ -1,33 +1,55 @@
 use crate::quality;
 use crate::types::*;
 use crate::vdo;
+use std::fmt::Write;
+
+/// `writeln!` into a String, which cannot fail.
+macro_rules! w {
+    ($out:expr) => {{
+        let _ = writeln!($out);
+    }};
+    ($out:expr, $($arg:tt)*) => {{
+        let _ = writeln!($out, $($arg)*);
+    }};
+}
 
 pub fn print_status(ports: &[Port], verbose: bool) -> bool {
-    let mut any_warnings = false;
-
-    if ports.is_empty() {
-        println!("No USB Type-C ports found.");
-        return false;
-    }
-
-    for port in ports {
-        print_port(port, verbose);
-        let warnings = quality::check_cable_quality(port);
-        if !warnings.is_empty() {
-            any_warnings = true;
-            println!("  Warnings:");
-            for w in &warnings {
-                println!("    \u{26a0} {w}");
-            }
-        }
-        println!();
-    }
-
+    let (text, any_warnings) = render_status(ports, verbose);
+    print!("{text}");
     any_warnings
 }
 
-fn print_port(port: &Port, verbose: bool) {
-    println!(
+/// Render the status report as text. Returns the text and whether any
+/// warnings were found.
+pub fn render_status(ports: &[Port], verbose: bool) -> (String, bool) {
+    let mut buf = String::new();
+    let out = &mut buf;
+    let mut any_warnings = false;
+
+    if ports.is_empty() {
+        w!(out, "No USB Type-C ports found.");
+        return (buf, false);
+    }
+
+    for port in ports {
+        write_port(out, port, verbose);
+        let warnings = quality::check_cable_quality(port);
+        if !warnings.is_empty() {
+            any_warnings = true;
+            w!(out, "  Warnings:");
+            for w in &warnings {
+                w!(out, "    \u{26a0} {w}");
+            }
+        }
+        w!(out);
+    }
+
+    (buf, any_warnings)
+}
+
+fn write_port(out: &mut String, port: &Port, verbose: bool) {
+    w!(
+        out,
         "Port {} [{}/{}]",
         port.number, port.data_role, port.power_role
     );
@@ -35,27 +57,27 @@ fn print_port(port: &Port, verbose: bool) {
     if verbose {
         if let Some(power) = &port.power {
             if !power.source.is_empty() {
-                println!("  Port Source Capabilities:");
-                print_pdo_list(&power.source, "    ");
+                w!(out, "  Port Source Capabilities:");
+                write_pdo_list(out, &power.source, "    ");
             }
             if !power.sink.is_empty() {
-                println!("  Port Sink Capabilities:");
-                print_pdo_list(&power.sink, "    ");
+                w!(out, "  Port Sink Capabilities:");
+                write_pdo_list(out, &power.sink, "    ");
             }
         }
     }
 
     match &port.partner {
-        Some(partner) => print_partner(partner, port, verbose),
-        None => println!("  (nothing connected)"),
+        Some(partner) => write_partner(out, partner, port, verbose),
+        None => w!(out, "  (nothing connected)"),
     }
 
     if let Some(cable) = &port.cable {
-        print_cable(cable, verbose);
+        write_cable(out, cable, verbose);
     }
 }
 
-fn print_partner(partner: &Partner, port: &Port, verbose: bool) {
+fn write_partner(out: &mut String, partner: &Partner, port: &Port, verbose: bool) {
     let product_type = vdo::field(
         partner.identity.id_header_vdo,
         vdo::ID_HEADER_VDO_PRODUCT_TYPE_OFFSET,
@@ -81,13 +103,14 @@ fn print_partner(partner: &Partner, port: &Port, verbose: bool) {
         format!(" ({})", caps.join(", "))
     };
 
-    println!("  Partner: {type_str}{caps_str}");
+    w!(out, "  Partner: {type_str}{caps_str}");
 
     if verbose {
         // ID Header VDO
         if partner.identity.id_header_vdo != 0 {
-            println!("    ID Header: {:#010x}", partner.identity.id_header_vdo);
-            vdo::print_vdo_fields(
+            w!(out, "    ID Header: {:#010x}", partner.identity.id_header_vdo);
+            vdo::write_vdo_fields(
+                out,
                 partner.identity.id_header_vdo,
                 vdo::ID_HEADER_VDO_FIELDS,
                 "    ",
@@ -99,11 +122,13 @@ fn print_partner(partner: &Partner, port: &Port, verbose: bool) {
             && (product_type == vdo::ID_HEADER_VDO_PRODUCT_TYPE_UFP_HUB
                 || product_type == vdo::ID_HEADER_VDO_PRODUCT_TYPE_UFP_PERIPHERAL)
         {
-            println!(
+            w!(
+                out,
                 "    UFP VDO1: {:#010x}",
                 partner.identity.product_type_vdo1
             );
-            vdo::print_vdo_fields(
+            vdo::write_vdo_fields(
+                out,
                 partner.identity.product_type_vdo1,
                 vdo::UFP_VDO1_FIELDS,
                 "    ",
@@ -112,11 +137,13 @@ fn print_partner(partner: &Partner, port: &Port, verbose: bool) {
 
         // DFP VDO (VDO3)
         if partner.identity.product_type_vdo3 != 0 {
-            println!(
+            w!(
+                out,
                 "    DFP VDO (VDO3): {:#010x}",
                 partner.identity.product_type_vdo3
             );
-            vdo::print_vdo_fields(
+            vdo::write_vdo_fields(
+                out,
                 partner.identity.product_type_vdo3,
                 vdo::DFP_VDO_FIELDS,
                 "    ",
@@ -139,7 +166,7 @@ fn print_partner(partner: &Partner, port: &Port, verbose: bool) {
                         4 => "USB4",
                         _ => "unknown",
                     };
-                    println!("    DFP: {dfp_type} ({host_desc})");
+                    w!(out, "    DFP: {dfp_type} ({host_desc})");
                 }
             }
         }
@@ -154,7 +181,7 @@ fn print_partner(partner: &Partner, port: &Port, verbose: bool) {
                 format!("{name} ({:#06x})", m.svid)
             })
             .collect();
-        println!("    Alt Modes: {}", modes.join(", "));
+        w!(out, "    Alt Modes: {}", modes.join(", "));
     }
 
     // Power info
@@ -162,12 +189,13 @@ fn print_partner(partner: &Partner, port: &Port, verbose: bool) {
         // Normal mode: one-line power summary
         if let Some(power) = &port.power {
             if !power.source.is_empty() {
-                println!("    Power: {}", format_power_summary(&power.source));
+                w!(out, "    Power: {}", format_power_summary(&power.source));
             }
         }
         if let Some(power) = &partner.power {
             if !power.source.is_empty() {
-                println!(
+                w!(
+                    out,
                     "    Partner Power: {}",
                     format_power_summary(&power.source)
                 );
@@ -177,18 +205,18 @@ fn print_partner(partner: &Partner, port: &Port, verbose: bool) {
         // Verbose mode: full PDO breakdown for partner
         if let Some(power) = &partner.power {
             if !power.source.is_empty() {
-                println!("    Partner Source Capabilities:");
-                print_pdo_list(&power.source, "      ");
+                w!(out, "    Partner Source Capabilities:");
+                write_pdo_list(out, &power.source, "      ");
             }
             if !power.sink.is_empty() {
-                println!("    Partner Sink Capabilities:");
-                print_pdo_list(&power.sink, "      ");
+                w!(out, "    Partner Sink Capabilities:");
+                write_pdo_list(out, &power.sink, "      ");
             }
         }
     }
 }
 
-fn print_cable(cable: &Cable, verbose: bool) {
+fn write_cable(out: &mut String, cable: &Cable, verbose: bool) {
     let speed = cable.identity.product_type_vdo1 & vdo::USB_SPEED_MASK;
     let speed_str = vdo::usb_speed_name(speed, cable.pd_revision);
 
@@ -203,7 +231,7 @@ fn print_cable(cable: &Cable, verbose: bool) {
         format!(" ({})", info.join(", "))
     };
 
-    println!("  Cable: {}{info_str}", cable.cable_type);
+    w!(out, "  Cable: {}{info_str}", cable.cable_type);
 
     if verbose {
         // Cable VDO1
@@ -212,20 +240,23 @@ fn print_cable(cable: &Cable, verbose: bool) {
                 CableType::Active => vdo::ACTIVE_CABLE_VDO1_FIELDS,
                 _ => vdo::PASSIVE_CABLE_VDO1_FIELDS,
             };
-            println!(
+            w!(
+                out,
                 "    Cable VDO1: {:#010x}",
                 cable.identity.product_type_vdo1
             );
-            vdo::print_vdo_fields(cable.identity.product_type_vdo1, fields, "    ");
+            vdo::write_vdo_fields(out, cable.identity.product_type_vdo1, fields, "    ");
         }
 
         // Active Cable VDO2
         if cable.cable_type == CableType::Active && cable.identity.product_type_vdo2 != 0 {
-            println!(
+            w!(
+                out,
                 "    Cable VDO2: {:#010x}",
                 cable.identity.product_type_vdo2
             );
-            vdo::print_vdo_fields(
+            vdo::write_vdo_fields(
+                out,
                 cable.identity.product_type_vdo2,
                 vdo::ACTIVE_CABLE_VDO2_FIELDS,
                 "    ",
@@ -242,7 +273,7 @@ fn print_cable(cable: &Cable, verbose: bool) {
                 format!("{name} ({:#06x})", m.svid)
             })
             .collect();
-        println!("    SOP' Alt Modes: {}", modes.join(", "));
+        w!(out, "    SOP' Alt Modes: {}", modes.join(", "));
     }
 }
 
@@ -290,9 +321,9 @@ fn alt_mode_name(svid: u16) -> &'static str {
 
 // --- PDO formatting ---
 
-fn print_pdo_list(pdos: &[Pdo], indent: &str) {
+fn write_pdo_list(out: &mut String, pdos: &[Pdo], indent: &str) {
     for (i, pdo) in pdos.iter().enumerate() {
-        println!("{indent}{}: {}", i + 1, format_pdo(pdo));
+        w!(out, "{indent}{}: {}", i + 1, format_pdo(pdo));
     }
 }
 

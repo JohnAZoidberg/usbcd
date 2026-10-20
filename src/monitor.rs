@@ -34,43 +34,7 @@ pub async fn run_monitor() -> Result<(), Box<dyn std::error::Error>> {
         prev_warnings.insert(port.number, quality::check_cable_quality(port));
     }
 
-    // Spawn a dedicated thread for udev monitoring. The udev socket needs
-    // poll() to block-wait for events, then receive_device() to read them.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    std::thread::spawn(move || {
-        let socket = match udev::MonitorBuilder::new()
-            .and_then(|b| b.match_subsystem("typec"))
-            .and_then(|b| b.listen())
-        {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("usbc monitor: failed to create udev monitor: {e}");
-                return;
-            }
-        };
-
-        let fd = socket.as_raw_fd();
-        loop {
-            let mut pollfd = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ret = unsafe { libc::poll(&mut pollfd as *mut _, 1, -1) };
-            if ret < 0 {
-                break;
-            }
-            if (pollfd.revents & libc::POLLIN) == 0 {
-                continue;
-            }
-
-            while socket.iter().next().is_some() {}
-
-            if tx.send(()).is_err() {
-                break;
-            }
-        }
-    });
+    let mut rx = spawn_udev_watcher();
 
     eprintln!("usbc monitor: watching for USB-C events...");
 
@@ -124,6 +88,51 @@ pub async fn run_monitor() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Watch udev for USB-C changes on a dedicated thread. Each wakeup sends one
+/// message; a single plug event usually produces a burst, so receivers should
+/// debounce. The channel closes if the monitor can't be created.
+pub fn spawn_udev_watcher() -> tokio::sync::mpsc::UnboundedReceiver<()> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    std::thread::spawn(move || {
+        let socket = match udev::MonitorBuilder::new()
+            .and_then(|b| b.match_subsystem("typec"))
+            .and_then(|b| b.match_subsystem("usb_power_delivery"))
+            .and_then(|b| b.listen())
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("usbc: failed to create udev monitor: {e}");
+                return;
+            }
+        };
+
+        // The udev socket needs poll() to block-wait for events, then
+        // receive_device() to read them.
+        let fd = socket.as_raw_fd();
+        loop {
+            let mut pollfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ret = unsafe { libc::poll(&mut pollfd as *mut _, 1, -1) };
+            if ret < 0 {
+                break;
+            }
+            if (pollfd.revents & libc::POLLIN) == 0 {
+                continue;
+            }
+
+            while socket.iter().next().is_some() {}
+
+            if tx.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 fn log_initial_state(ports: &[Port]) {

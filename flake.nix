@@ -14,16 +14,26 @@
       packages = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-        in
-        {
-          default = pkgs.rustPlatform.buildRustPackage {
-            pname = "usbc";
+          mkUsbc = { gui ? false }: pkgs.rustPlatform.buildRustPackage {
+            pname = if gui then "usbc-gui" else "usbc";
             version = "0.1.0";
             src = ./.;
-            cargoHash = "sha256-KFq074YriiMAJ38khqIlxeK2ON9a/+2AjEUvnLQEwcg=";
-            nativeBuildInputs = [ pkgs.pkg-config ];
-            buildInputs = [ pkgs.systemdMinimal ];
+            cargoHash = "sha256-uGIlf5ZP6U+yzLLGfPzG/bxNjXbR8u+qvVihLaGagTw=";
+            buildFeatures = pkgs.lib.optional gui "gui";
+            nativeBuildInputs = [ pkgs.pkg-config ]
+              ++ pkgs.lib.optional gui pkgs.wrapGAppsHook4;
+            buildInputs = [ pkgs.systemdMinimal ]
+              ++ pkgs.lib.optionals gui [ pkgs.gtk4 pkgs.libadwaita ];
+            postInstall = pkgs.lib.optionalString gui ''
+              install -Dm644 usbc.desktop -t $out/share/applications
+            '';
           };
+        in
+        {
+          default = mkUsbc { };
+
+          # Includes the `usbc gui` desktop window.
+          gui = mkUsbc { gui = true; };
         });
 
       devShells = forAllSystems (system:
@@ -39,6 +49,8 @@
             ];
             buildInputs = [
               pkgs.systemdMinimal
+              pkgs.gtk4
+              pkgs.libadwaita
             ];
           };
         });

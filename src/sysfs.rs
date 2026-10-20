@@ -4,9 +4,13 @@ use std::path::Path;
 
 const TYPEC_SYSFS: &str = "/sys/class/typec";
 
-/// Scan all USB Type-C ports from sysfs.
+/// Scan all USB Type-C ports from sysfs. `USBC_SYSFS_ROOT` overrides the
+/// location, for trying out the UI against a fake tree.
 pub fn scan_ports() -> Vec<Port> {
-    scan_ports_at(Path::new(TYPEC_SYSFS))
+    match std::env::var_os("USBC_SYSFS_ROOT") {
+        Some(root) => scan_ports_at(Path::new(&root)),
+        None => scan_ports_at(Path::new(TYPEC_SYSFS)),
+    }
 }
 
 /// Scan a single port by number.
