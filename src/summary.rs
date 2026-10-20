@@ -312,6 +312,7 @@ mod tests {
             number: 0,
             data_role: DataRole::Host,
             power_role,
+            power_operation_mode: PowerOpMode::Default,
             partner,
             cable,
             power: None,

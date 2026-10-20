@@ -146,11 +146,52 @@ pub struct Cable {
     pub plug_alt_modes: Vec<AltMode>,
 }
 
+/// Active power operation mode for a Type-C port, as reported by the kernel
+/// in `/sys/class/typec/portN/power_operation_mode`.
+///
+/// This field tells us whether *any* power contract is active — even when
+/// `portN-partner` is absent (e.g. the partner didn't respond to Discover
+/// Identity but a PD power contract is still in effect).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PowerOpMode {
+    /// No contract — default USB current (500 mA / 900 mA).
+    Default,
+    /// Legacy Type-C current advertisement (no PD).
+    Current15A,
+    Current30A,
+    /// USB PD contract active.
+    UsbPowerDelivery,
+    Other(String),
+    None,
+}
+
+impl PowerOpMode {
+    /// True if a partner is electrically connected (anything other than the
+    /// idle "default" state).
+    pub fn has_connection(&self) -> bool {
+        !matches!(self, PowerOpMode::Default | PowerOpMode::None)
+    }
+}
+
+impl fmt::Display for PowerOpMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PowerOpMode::Default => write!(f, "default"),
+            PowerOpMode::Current15A => write!(f, "1.5A"),
+            PowerOpMode::Current30A => write!(f, "3.0A"),
+            PowerOpMode::UsbPowerDelivery => write!(f, "PD"),
+            PowerOpMode::Other(s) => write!(f, "{s}"),
+            PowerOpMode::None => write!(f, "unknown"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Port {
     pub number: u32,
     pub data_role: DataRole,
     pub power_role: PowerRole,
+    pub power_operation_mode: PowerOpMode,
     pub partner: Option<Partner>,
     pub cable: Option<Cable>,
     pub power: Option<PowerCapabilities>,

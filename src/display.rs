@@ -48,9 +48,20 @@ pub fn render_status(ports: &[Port], verbose: bool) -> (String, bool) {
 }
 
 fn write_port(out: &mut String, port: &Port, verbose: bool) {
+    // Annotate the header with the operation mode whenever a partner is
+    // electrically connected — this is the only signal we have when the kernel
+    // didn't expose a portN-partner directory (e.g. partner ignored Discover
+    // Identity but a PD power contract is still in force).
+    let mode_tag = match &port.power_operation_mode {
+        PowerOpMode::UsbPowerDelivery => ", PD",
+        PowerOpMode::Current15A => ", USB 1.5A",
+        PowerOpMode::Current30A => ", USB 3.0A",
+        PowerOpMode::Other(_) => ", connected",
+        PowerOpMode::Default | PowerOpMode::None => "",
+    };
     w!(
         out,
-        "Port {} [{}/{}]",
+        "Port {} [{}/{}{mode_tag}]",
         port.number, port.data_role, port.power_role
     );
 
@@ -69,11 +80,49 @@ fn write_port(out: &mut String, port: &Port, verbose: bool) {
 
     match &port.partner {
         Some(partner) => write_partner(out, partner, port, verbose),
-        None => w!(out, "  (nothing connected)"),
+        None => {
+            // No partner directory in sysfs. If the kernel reports an active
+            // power contract anyway, surface that — otherwise the user is left
+            // believing nothing is plugged in even though a charger is.
+            if port.power_operation_mode.has_connection() {
+                w!(
+                    out,
+                    "  Partner: connected ({} — no PD identity reported)",
+                    port.power_operation_mode
+                );
+                write_local_power_summary(out, port, verbose);
+            } else {
+                w!(out, "  (nothing connected)");
+            }
+        }
     }
 
     if let Some(cable) = &port.cable {
         write_cable(out, cable, verbose);
+    }
+}
+
+/// Write a one-line summary of the port's own PD capabilities, chosen by the
+/// active power role. For a sink port this is the laptop's input limit; for a
+/// source port this is what the laptop offers. Skipped in verbose mode because
+/// the full PDO list is written above.
+fn write_local_power_summary(out: &mut String, port: &Port, verbose: bool) {
+    if verbose {
+        return;
+    }
+    let Some(power) = &port.power else { return };
+    match port.power_role {
+        PowerRole::Sink if !power.sink.is_empty() => {
+            w!(out, "    Port can sink: {}", format_power_summary(&power.sink));
+        }
+        PowerRole::Source if !power.source.is_empty() => {
+            w!(
+                out,
+                "    Port can source: {}",
+                format_power_summary(&power.source)
+            );
+        }
+        _ => {}
     }
 }
 
@@ -186,18 +235,41 @@ fn write_partner(out: &mut String, partner: &Partner, port: &Port, verbose: bool
 
     // Power info
     if !verbose {
-        // Normal mode: one-line power summary
+        // Normal mode: one-line power summary. Show the *relevant* side of the
+        // port's caps based on the active power role — source-caps when the
+        // laptop is sourcing, sink-caps when sinking (the input limit).
         if let Some(power) = &port.power {
-            if !power.source.is_empty() {
-                w!(out, "    Power: {}", format_power_summary(&power.source));
+            match port.power_role {
+                PowerRole::Source if !power.source.is_empty() => {
+                    w!(
+                        out,
+                        "    Port can source: {}",
+                        format_power_summary(&power.source)
+                    );
+                }
+                PowerRole::Sink if !power.sink.is_empty() => {
+                    w!(
+                        out,
+                        "    Port can sink: {}",
+                        format_power_summary(&power.sink)
+                    );
+                }
+                _ => {}
             }
         }
         if let Some(power) = &partner.power {
             if !power.source.is_empty() {
                 w!(
                     out,
-                    "    Partner Power: {}",
+                    "    Partner can source: {}",
                     format_power_summary(&power.source)
+                );
+            }
+            if !power.sink.is_empty() {
+                w!(
+                    out,
+                    "    Partner can sink: {}",
+                    format_power_summary(&power.sink)
                 );
             }
         }

@@ -59,6 +59,7 @@ fn read_port(base: &Path, n: u32) -> Option<Port> {
 
     let data_role = read_role_file(&port_dir.join("data_role"));
     let power_role = read_power_role_file(&port_dir.join("power_role"));
+    let power_operation_mode = read_power_operation_mode(&port_dir.join("power_operation_mode"));
 
     let partner = read_partner(base, n);
     let cable = read_cable(base, n);
@@ -68,10 +69,25 @@ fn read_port(base: &Path, n: u32) -> Option<Port> {
         number: n,
         data_role,
         power_role,
+        power_operation_mode,
         partner,
         cable,
         power,
     })
+}
+
+fn read_power_operation_mode(path: &Path) -> PowerOpMode {
+    let s = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return PowerOpMode::None,
+    };
+    match s.trim() {
+        "default" => PowerOpMode::Default,
+        "1.5A" => PowerOpMode::Current15A,
+        "3.0A" => PowerOpMode::Current30A,
+        "usb_power_delivery" => PowerOpMode::UsbPowerDelivery,
+        other => PowerOpMode::Other(other.to_string()),
+    }
 }
 
 fn read_partner(base: &Path, port_num: u32) -> Option<Partner> {
@@ -366,7 +382,15 @@ pub fn create_fake_port(
     fs::create_dir_all(&port_dir).unwrap();
     fs::write(port_dir.join("data_role"), data_role).unwrap();
     fs::write(port_dir.join("power_role"), power_role).unwrap();
+    // Default to "default" so the port looks idle unless overridden.
+    fs::write(port_dir.join("power_operation_mode"), "default").unwrap();
     port_dir
+}
+
+#[cfg(test)]
+pub fn set_fake_power_operation_mode(base: &Path, port_num: u32, mode: &str) {
+    let port_dir = base.join(format!("port{port_num}"));
+    fs::write(port_dir.join("power_operation_mode"), mode).unwrap();
 }
 
 #[cfg(test)]
