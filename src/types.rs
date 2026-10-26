@@ -255,6 +255,61 @@ impl fmt::Display for PowerOpMode {
     }
 }
 
+/// What a USB Billboard reports for one alternate mode (`bmConfigured`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AltModeStatus {
+    /// Unspecified error.
+    Error,
+    /// Configuration not attempted, or exited.
+    NotAttempted,
+    /// Configuration attempted but unsuccessful, mode not entered.
+    Unsuccessful,
+    Entered,
+}
+
+impl fmt::Display for AltModeStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AltModeStatus::Error => write!(f, "error"),
+            AltModeStatus::NotAttempted => write!(f, "not attempted"),
+            AltModeStatus::Unsuccessful => write!(f, "failed"),
+            AltModeStatus::Entered => write!(f, "entered"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillboardMode {
+    pub svid: u16,
+    pub mode: u8,
+    pub status: AltModeStatus,
+}
+
+/// A USB Billboard device behind a port: the partner's own report of the
+/// alternate modes it offers and which of them came up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Billboard {
+    /// USB device name in sysfs, e.g. "3-3.5".
+    pub device: String,
+    /// Index into `modes` of the mode the device prefers.
+    pub preferred: Option<usize>,
+    pub modes: Vec<BillboardMode>,
+}
+
+impl Billboard {
+    /// The mode that should have come up but didn't: the preferred one, else
+    /// the first. None when any mode was entered, since devices with several
+    /// modes leave the others "not attempted" once one is up.
+    pub fn failed_mode(&self) -> Option<&BillboardMode> {
+        if self.modes.iter().any(|m| m.status == AltModeStatus::Entered) {
+            return None;
+        }
+        self.preferred
+            .and_then(|i| self.modes.get(i))
+            .or_else(|| self.modes.first())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Port {
     pub number: u32,
@@ -272,6 +327,8 @@ pub struct Port {
     pub usb_capability_default: Option<String>,
     pub vconn_source: Option<bool>,
     pub contract: Option<Contract>,
+    /// USB Billboard devices that came through this port.
+    pub billboards: Vec<Billboard>,
 }
 
 impl Port {
@@ -325,6 +382,9 @@ pub enum CableWarning {
     InvalidTbtCable,
     /// USB speed is limited by the cable.
     SpeedLimitingCable,
+    /// The partner's Billboard says the alternate mode with this SVID never
+    /// came up.
+    AltModeNotEntered(u16),
 }
 
 impl CableWarning {
@@ -336,7 +396,17 @@ impl CableWarning {
             CableWarning::InvalidUsb4Cable => "invalid_usb4_cable",
             CableWarning::InvalidTbtCable => "invalid_tbt_cable",
             CableWarning::SpeedLimitingCable => "speed_limiting_cable",
+            CableWarning::AltModeNotEntered(_) => "alt_mode_not_entered",
         }
+    }
+}
+
+/// Human name of an alternate mode, for warnings.
+pub fn alt_mode_label(svid: u16) -> String {
+    match svid {
+        crate::vdo::DP_ALT_MODE_SID => "DisplayPort".into(),
+        crate::vdo::TBT_ALT_MODE_VID => "Thunderbolt".into(),
+        _ => format!("Alternate mode {svid:#06x}"),
     }
 }
 
@@ -362,6 +432,11 @@ impl fmt::Display for CableWarning {
             CableWarning::SpeedLimitingCable => write!(
                 f,
                 "Cable is limiting connection speed — device supports faster speeds than the cable allows"
+            ),
+            CableWarning::AltModeNotEntered(svid) => write!(
+                f,
+                "{} was never set up, per the device's Billboard — the cable may be charge-only or USB 2.0, or this port may not support it",
+                alt_mode_label(*svid)
             ),
         }
     }

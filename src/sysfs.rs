@@ -1,16 +1,27 @@
+use crate::billboard;
 use crate::types::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const TYPEC_SYSFS: &str = "/sys/class/typec";
 
-/// Scan all USB Type-C ports from sysfs. `USBC_SYSFS_ROOT` overrides the
-/// location, for trying out the UI against a fake tree.
+/// Scan all USB Type-C ports from sysfs, with the USB Billboards behind
+/// them. `USBC_SYSFS_ROOT` and `USBC_USB_SYSFS_ROOT` override the typec and
+/// USB device locations, for trying out the UI against a fake tree.
 pub fn scan_ports() -> Vec<Port> {
-    match std::env::var_os("USBC_SYSFS_ROOT") {
-        Some(root) => scan_ports_at(Path::new(&root)),
+    let typec_root = std::env::var_os("USBC_SYSFS_ROOT");
+    let usb_root = std::env::var_os("USBC_USB_SYSFS_ROOT");
+    let mut ports = match &typec_root {
+        Some(root) => scan_ports_at(Path::new(root)),
         None => scan_ports_at(Path::new(TYPEC_SYSFS)),
+    };
+    // The real USB bus doesn't belong on a fake typec tree.
+    match (&typec_root, &usb_root) {
+        (_, Some(usb)) => billboard::attach_billboards(&mut ports, Path::new(usb)),
+        (None, None) => billboard::attach_billboards(&mut ports, Path::new(billboard::USB_SYSFS)),
+        (Some(_), None) => {}
     }
+    ports
 }
 
 /// Scan a single port by number.
@@ -80,6 +91,7 @@ fn read_port(base: &Path, n: u32) -> Option<Port> {
         usb_capability_default,
         vconn_source: read_yes_no(&port_dir.join("vconn_source")),
         contract: read_contract(&port_dir, n),
+        billboards: Vec::new(),
     })
 }
 

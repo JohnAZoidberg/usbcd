@@ -3,6 +3,29 @@ use crate::vdo::*;
 
 /// Run all cable quality checks for a port and return any warnings.
 pub fn check_cable_quality(port: &Port) -> Vec<CableWarning> {
+    let mut warnings = identity_warnings(port);
+
+    // The Billboard is the device saying the mode failed, which is firmer
+    // than the identity check's guess and works without any PD identity.
+    for billboard in &port.billboards {
+        let Some(mode) = billboard.failed_mode() else {
+            continue;
+        };
+        if mode.svid == DP_ALT_MODE_SID {
+            warnings.retain(|w| *w != CableWarning::InvalidDpCable);
+        }
+        let warning = CableWarning::AltModeNotEntered(mode.svid);
+        if !warnings.contains(&warning) {
+            warnings.push(warning);
+        }
+    }
+
+    warnings
+}
+
+/// The checks ported from typecd, which judge the partner and cable PD
+/// identities against each other.
+fn identity_warnings(port: &Port) -> Vec<CableWarning> {
     let mut warnings = Vec::new();
 
     let partner = match &port.partner {
@@ -672,6 +695,58 @@ mod tests {
         };
         let warnings = check_cable_quality(&port);
         assert!(warnings.is_empty());
+    }
+
+    fn billboard(status: AltModeStatus) -> Billboard {
+        Billboard {
+            device: "3-3.5".into(),
+            preferred: Some(0),
+            modes: vec![BillboardMode { svid: DP_ALT_MODE_SID, mode: 1, status }],
+        }
+    }
+
+    #[test]
+    fn test_billboard_without_pd_identity() {
+        // UCSI firmware that reports no partner alt modes and no cable
+        // identity: the Billboard is the only evidence.
+        let port = Port {
+            data_role: DataRole::Host,
+            partner: Some(Partner::default()),
+            billboards: vec![billboard(AltModeStatus::NotAttempted)],
+            ..Default::default()
+        };
+        assert_eq!(
+            check_cable_quality(&port),
+            vec![CableWarning::AltModeNotEntered(DP_ALT_MODE_SID)]
+        );
+
+        let entered = Port {
+            billboards: vec![billboard(AltModeStatus::Entered)],
+            ..port
+        };
+        assert!(check_cable_quality(&entered).is_empty());
+    }
+
+    #[test]
+    fn test_billboard_replaces_dp_cable_guess() {
+        // A DP receptacle monitor on a cable without an e-marker: the
+        // identity check can only say "may not", the Billboard says "didn't".
+        let partner = make_partner(
+            0x6c0004b4, 0x8, PdRevision::V3_0,
+            vec![AltMode { svid: DP_ALT_MODE_SID, vdo: 0x000c0045 }],
+        );
+        let mut port = Port {
+            data_role: DataRole::Host,
+            partner: Some(partner),
+            ..Default::default()
+        };
+        assert_eq!(check_cable_quality(&port), vec![CableWarning::InvalidDpCable]);
+
+        port.billboards = vec![billboard(AltModeStatus::Unsuccessful)];
+        assert_eq!(
+            check_cable_quality(&port),
+            vec![CableWarning::AltModeNotEntered(DP_ALT_MODE_SID)]
+        );
     }
 
     #[test]

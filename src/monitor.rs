@@ -170,6 +170,9 @@ pub fn spawn_udev_watcher() -> tokio::sync::mpsc::UnboundedReceiver<()> {
             .and_then(|b| b.match_subsystem("typec"))
             .and_then(|b| b.match_subsystem("usb_power_delivery"))
             .and_then(|b| b.match_subsystem("power_supply"))
+            // A Billboard enumerates after the alt mode timeout, once the
+            // typec burst has settled.
+            .and_then(|b| b.match_subsystem("usb"))
             .and_then(|b| b.listen())
         {
             Ok(s) => s,

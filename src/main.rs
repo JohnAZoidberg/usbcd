@@ -1,3 +1,4 @@
+mod billboard;
 mod display;
 #[cfg(feature = "gui")]
 mod gui;

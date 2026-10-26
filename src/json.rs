@@ -57,6 +57,7 @@ fn write_port(out: &mut String, port: &Port) {
     field(out, "cable", &cable(port.cable.as_ref()));
     field(out, "source_pdos", &pdos(port.power.as_ref().map(|p| &p.source[..])));
     field(out, "sink_pdos", &pdos(port.power.as_ref().map(|p| &p.sink[..])));
+    field(out, "billboards", &billboards(&port.billboards));
     let ids: Vec<String> = warnings.iter().map(|w| quoted(w.id())).collect();
     field_last(out, "warnings", &format!("[{}]", ids.join(",")));
     out.push('}');
@@ -109,6 +110,36 @@ fn alt_modes(modes: &[AltMode]) -> String {
     let items: Vec<String> = modes
         .iter()
         .map(|m| format!("{{\"svid\":\"{:#06x}\",\"vdo\":\"{:#010x}\"}}", m.svid, m.vdo))
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+fn billboards(list: &[Billboard]) -> String {
+    let items: Vec<String> = list
+        .iter()
+        .map(|b| {
+            let modes: Vec<String> = b
+                .modes
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{{\"svid\":\"{:#06x}\",\"mode\":{},\"status\":{}}}",
+                        m.svid,
+                        m.mode,
+                        quoted(&m.status.to_string())
+                    )
+                })
+                .collect();
+            let preferred = b
+                .preferred
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "null".into());
+            format!(
+                "{{\"device\":{},\"preferred\":{preferred},\"modes\":[{}]}}",
+                quoted(&b.device),
+                modes.join(",")
+            )
+        })
         .collect();
     format!("[{}]", items.join(","))
 }

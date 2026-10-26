@@ -22,6 +22,16 @@ desktops (GNOME, KDE, Sway) have no equivalent. This tool fills that gap.
 | Invalid USB4, valid TBT cable | Partner supports USB4 but the cable limits you to Thunderbolt |
 | Invalid TBT cable | Partner supports Thunderbolt but the cable prevents TBT entry |
 | Speed limiting cable | Cable's max USB speed is lower than what the device supports |
+| Alt mode not entered | The device's USB Billboard says its alternate mode (usually DisplayPort) never came up |
+
+The first five need PD identity data from the partner and cable. Much laptop
+UCSI firmware reports neither, so `usbc` also reads USB Billboard devices: a
+USB-C monitor or adapter that wanted DisplayPort and didn't get it shows up on
+USB 2.0 as a Billboard whose BOS descriptor lists each mode and its outcome
+(not attempted, failed, entered). The kernel exposes the BOS to all users as
+`/sys/bus/usb/devices/*/bos_descriptors`, so no root is needed. A charge-only
+or USB 2.0 cable is the usual cause; a port that can't drive a display is the
+other. Billboards that report a mode as entered are shown but not warned about.
 
 ## Usage
 
@@ -96,7 +106,8 @@ usbc status --json | jq '.ports[] | select(.connected) | .contract'
 $ usbc monitor
 ```
 
-Watches for udev `typec`, `usb_power_delivery` and `power_supply` events. When
+Watches for udev `typec`, `usb_power_delivery`, `power_supply` and `usb`
+events. When
 something changes, it waits for the kernel to finish discovery (2 s debounce),
 rescans, runs the quality checks, and sends a freedesktop.org desktop
 notification if the cable is suboptimal. Already-connected devices are scanned
@@ -145,6 +156,8 @@ GTK 4 and libadwaita; the CLI and monitor don't need them.
 
 To try the UI without USB-C hardware, point it at a fake sysfs tree:
 `USBC_SYSFS_ROOT=/path/to/fake usbc gui` (this also works for `usbc status`).
+Billboards are then read from `USBC_USB_SYSFS_ROOT` if set, and not at all
+otherwise.
 
 ## Building
 
@@ -258,16 +271,20 @@ journalctl --user -u usbc-monitor
    and PDO lists (fixed, variable, battery, PPS, SPR AVS) for the port, the
    partner and the cable, plus the kernel's own cable `type`/`plug_type` and
    partner flags. The negotiated contract comes from the port's
-   `*-source-psy-*` power supply.
+   `*-source-psy-*` power supply. USB Billboards come from
+   `/sys/bus/usb/devices`, matched to a port by the root hub port's
+   `connector` link, or, without one, to the only connected port where the
+   computer is USB host. A Billboard that matches no single port is skipped.
 
 2. **Quality checks** -- Ported from typecd's `cable.cc`, `partner.cc`,
    `port.cc`, and `port_manager.cc`. Evaluates whether the cable supports the
    partner's best mode (USB4 > TBT > DP) and whether it limits USB speed. They
    need identity VDOs, so they stay silent for partners and cables that didn't
-   report any.
+   report any. A Billboard whose modes were none of them entered adds its own
+   warning, and replaces the DP cable guess when it is about DisplayPort.
 
-3. **udev monitor** -- Subscribes to the `typec`, `usb_power_delivery` and
-   `power_supply` subsystems, debounces rapid event bursts from a single plug
+3. **udev monitor** -- Subscribes to the `typec`, `usb_power_delivery`,
+   `power_supply` and `usb` subsystems, debounces rapid event bursts from a single plug
    event, then re-scans, logs what changed and evaluates.
 
 4. **Notifications** -- Sends desktop notifications via the standard

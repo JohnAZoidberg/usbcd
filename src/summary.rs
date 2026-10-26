@@ -588,6 +588,23 @@ fn issue_for(warning: CableWarning) -> Issue {
             "The device supports faster data transfer than this cable. \
              A higher-rated cable will make it faster.",
         ),
+        CableWarning::AltModeNotEntered(DP_ALT_MODE_SID) => (
+            "The display connection never started",
+            "The device asked for video over USB-C, but it was never set up. \
+             This usually means a charge-only or USB 2.0 cable: try a cable rated \
+             for 10 Gbps or faster. Some ports can't drive a display, so another \
+             port may also help.",
+        ),
+        CableWarning::AltModeNotEntered(TBT_ALT_MODE_VID) => (
+            "Thunderbolt never started",
+            "The device asked for Thunderbolt, but it was never set up. \
+             Use a Thunderbolt 3, Thunderbolt 4, or USB4 cable, or try another port.",
+        ),
+        CableWarning::AltModeNotEntered(_) => (
+            "A device feature never started",
+            "The device asked for a special USB-C mode, but it was never set up. \
+             Try a full-featured USB-C cable, or another port.",
+        ),
     };
     Issue {
         warning,

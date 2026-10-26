@@ -75,5 +75,15 @@ fn warning_text(port_num: u32, warning: &CableWarning) -> (&'static str, String,
             ),
             0, // low urgency
         ),
+        CableWarning::AltModeNotEntered(svid) => (
+            summary,
+            format!(
+                "Port {port_num}: The connected device wants {} but it was never set up. \
+                 The cable may be charge-only or USB 2.0; try a full-featured USB-C cable, \
+                 or another port.",
+                crate::types::alt_mode_label(*svid)
+            ),
+            1,
+        ),
     }
 }

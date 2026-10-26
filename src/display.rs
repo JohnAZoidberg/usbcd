@@ -184,6 +184,15 @@ fn write_port(out: &mut String, port: &Port, verbose: bool) {
     if let Some(cable) = &port.cable {
         write_cable(out, cable, verbose);
     }
+
+    for billboard in &port.billboards {
+        let modes: Vec<String> = billboard
+            .modes
+            .iter()
+            .map(|m| format!("{} ({:#06x}) {}", alt_mode_name(m.svid), m.svid, m.status))
+            .collect();
+        w!(out, "  Billboard (USB {}): {}", billboard.device, modes.join(", "));
+    }
 }
 
 fn write_partner(out: &mut String, partner: &Partner, port: &Port, verbose: bool) {
