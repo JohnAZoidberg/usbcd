@@ -22,7 +22,8 @@ pub async fn send_notification(port_num: u32, warning: &CableWarning) -> Result<
                 summary,                           // summary
                 body,                              // body
                 &[] as &[&str],                    // actions
-                &[("urgency", zbus::zvariant::Value::from(urgency))], // hints
+                // hints: a{sv}, so a map; a slice of pairs would be a(sv)
+                std::collections::HashMap::from([("urgency", zbus::zvariant::Value::from(urgency))]),
                 -1i32,                             // expire_timeout (-1 = server default)
             ),
         )
